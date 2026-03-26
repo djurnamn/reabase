@@ -1,0 +1,27 @@
+<REAPER_PROJECT 0.1 "7.55/macOS-arm64" 1772476508 0
+  RIPPLE 0 0
+  MARKER 3 423.90304245536453 "tape stop på ambiens/ev musik" 0 0 1 B {42DC5A04-D731-0041-9494-E19F1AE81C40} 0
+  <TRACK {D3C1D44E-D937-C641-8A66-FE0163982DAA}
+    NAME "FLICKA MED SOLROS"
+    VOLPAN 1 0 -1 -1 1
+    ISBUS 0 0
+    MAINSEND 1 0
+    <ITEM
+      POSITION 487.60244821182505
+      LENGTH 618.07203519725908
+      NAME "sospodd s01e01 - urval - del 1 - FLICKA MED SOLROS.wav"
+      <SOURCE WAVE
+        FILE "Media/sospodd s01e01 - urval - del 1 - FLICKA MED SOLROS.wav"
+      >
+      <EXT
+        nvk_take_source_type_v2 WAVE
+      >
+    >
+  >
+  <TRACK {C72DA508-EC72-7449-8F3A-EB65CCB1F5C1}
+    NAME DÖRR
+    VOLPAN 1 0 -1 -1 1
+    ISBUS 0 0
+    MAINSEND 1 0
+  >
+>
