@@ -20,8 +20,11 @@ export interface PresetDefinition {
   override?: Record<string, { stateFile: string }>;
   /** Slot IDs to remove from parent */
   remove?: string[];
-  /** New slots to add (data comes from child's fxChainFile) */
-  add?: Array<{ id: string; after?: string }>;
+  /** New slots to add (data comes from child's fxChainFile).
+   *  Use `after` to place the new slot right after a named slot, or `before`
+   *  to place it right before. The two are mutually exclusive on a single
+   *  entry. With neither, the slot appends to the end of the chain. */
+  add?: Array<{ id: string; after?: string; before?: string }>;
 }
 
 /**

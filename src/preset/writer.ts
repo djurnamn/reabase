@@ -46,50 +46,84 @@ export function updateRootPreset(
 /**
  * Update a child preset's overrides and additions based on current fingerprints.
  *
- * For each owned plugin:
+ * For each owned slot:
  * - If slotId exists in parent chain and state differs: write param file + override entry
  * - If slotId exists in parent chain and state matches: remove override (inherits naturally)
  * - If slotId not in parent chain: add entry + include in child preset file
+ *
+ * Add entries are emitted in the order they appear in the track's full chain,
+ * with anchors picked so the resolver reproduces that order exactly:
+ * - Closest preceding "known" slot (parent slot, or earlier-emitted addition) → `after:`.
+ * - Otherwise, closest following parent slot → `before:`.
+ * - Otherwise (no anchor) → appended at end.
+ *
+ * `fullChain` is the full track chain (in order) — needed to figure out where
+ * each owned addition sits relative to parent slots, which is how `before:`
+ * gets generated when an owned plugin is positioned ahead of any parent slot.
  */
 export function updateChildPreset(
   presetsDirectory: string,
   definition: PresetDefinition,
   parentChain: FxFingerprint[],
-  ownedFingerprints: FxFingerprint[]
+  fullChain: FxFingerprint[],
+  ownedSlotIds: string[]
 ): void {
   const fxDirectory = join(presetsDirectory, "fx");
   mkdirSync(fxDirectory, { recursive: true });
 
-  const parentSlotIds = new Set(parentChain.map((fx) => fx.slotId));
+  const parentSlotIdSet = new Set(parentChain.map((fx) => fx.slotId));
+  const ownedSet = new Set(ownedSlotIds);
   const overrides: Record<string, { stateFile: string }> = {};
   const additions: FxFingerprint[] = [];
-  const addEntries: Array<{ id: string; after?: string }> = [];
+  const addEntries: Array<{ id: string; after?: string; before?: string }> = [];
 
-  for (const fp of ownedFingerprints) {
-    if (parentSlotIds.has(fp.slotId)) {
-      // Plugin exists in parent chain — check if state differs
+  for (let i = 0; i < fullChain.length; i++) {
+    const fp = fullChain[i];
+    if (!ownedSet.has(fp.slotId)) continue;
+
+    if (parentSlotIdSet.has(fp.slotId)) {
+      // Owned slot is inherited from parent — check whether to write an override.
       const parentFp = parentChain.find((pfx) => pfx.slotId === fp.slotId);
       if (parentFp && parentFp.stateHash !== fp.stateHash) {
-        // State differs — write parameter file and add override
         const stateFileName = `fx/${definition.name}_${fp.slotId}.json`;
         const stateFilePath = resolve(presetsDirectory, stateFileName);
         writeFileSync(stateFilePath, JSON.stringify(fp.parameters, null, 2), "utf-8");
         overrides[fp.slotId] = { stateFile: stateFileName };
       }
-      // If state matches, do nothing — inherits naturally (no override needed)
-    } else {
-      // Plugin not in parent chain — it's an addition
-      additions.push(fp);
+      // State matches → inherit naturally, no override.
+      continue;
+    }
 
-      // Determine insertion point: find the previous plugin in the full chain
-      const ownedIndex = ownedFingerprints.indexOf(fp);
-      if (ownedIndex > 0) {
-        const previousSlotId = ownedFingerprints[ownedIndex - 1].slotId;
-        addEntries.push({ id: fp.slotId, after: previousSlotId });
-      } else {
-        addEntries.push({ id: fp.slotId });
+    // Owned slot is an addition. Pick the anchor that will reproduce its
+    // current chain position when the resolver replays the YAML.
+    additions.push(fp);
+
+    // "Known" slots at this point in the YAML walk: parent slots plus any
+    // additions we've already emitted. Future additions aren't known yet,
+    // so they can't serve as anchors here.
+    const knownAtThisPoint = new Set<string>([
+      ...parentSlotIdSet,
+      ...addEntries.map((e) => e.id),
+    ]);
+
+    const entry: { id: string; after?: string; before?: string } = { id: fp.slotId };
+
+    for (let j = i - 1; j >= 0; j--) {
+      if (knownAtThisPoint.has(fullChain[j].slotId)) {
+        entry.after = fullChain[j].slotId;
+        break;
       }
     }
+    if (!entry.after) {
+      for (let j = i + 1; j < fullChain.length; j++) {
+        if (knownAtThisPoint.has(fullChain[j].slotId)) {
+          entry.before = fullChain[j].slotId;
+          break;
+        }
+      }
+    }
+
+    addEntries.push(entry);
   }
 
   // Build YAML definition

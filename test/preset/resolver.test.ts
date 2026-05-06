@@ -381,6 +381,97 @@ describe("resolvePreset", () => {
     expect(resolved.fxChain[1].pluginName).toBe("AU: kHs Limiter (Kilohearts)");
   });
 
+  it("places an added slot before a named anchor with `before:`", () => {
+    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
+    writePresetJson("fx/child_add.json", "AU: kHs Filter (Kilohearts)", paramsB);
+
+    const presets = new Map<string, PresetDefinition>([
+      ["parent", {
+        name: "parent",
+        fxChainFile: "fx/parent.json",
+        plugins: [{ id: "de-esser" }],
+      }],
+      ["child", {
+        name: "child",
+        extends: "parent",
+        fxChainFile: "fx/child_add.json",
+        add: [{ id: "filter", before: "de-esser" }],
+      }],
+    ]);
+
+    const resolved = resolvePreset("child", presets, tempDir);
+    expect(resolved.fxChain).toHaveLength(2);
+    expect(resolved.fxChain[0].slotId).toBe("filter");
+    expect(resolved.fxChain[1].slotId).toBe("de-esser");
+  });
+
+  it("supports `before:` referencing a sibling addition emitted earlier in the same level", () => {
+    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
+    const childPlugins = [
+      {
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        pluginType: "AU",
+        pluginParams: ["", "", 0, "", ""],
+        slotId: "auto1",
+        parameters: paramsB,
+      },
+      {
+        pluginName: "AU: kHs Compressor (Kilohearts)",
+        pluginType: "AU",
+        pluginParams: ["", "", 0, "", ""],
+        slotId: "auto2",
+        parameters: paramsLimiter,
+      },
+    ];
+    writeFileSync(join(tempDir, "fx/child_add.json"), JSON.stringify(childPlugins), "utf-8");
+
+    const presets = new Map<string, PresetDefinition>([
+      ["parent", {
+        name: "parent",
+        fxChainFile: "fx/parent.json",
+        plugins: [{ id: "de-esser" }],
+      }],
+      ["child", {
+        name: "child",
+        extends: "parent",
+        fxChainFile: "fx/child_add.json",
+        add: [
+          { id: "filter", before: "de-esser" },
+          { id: "compressor", before: "filter" },
+        ],
+      }],
+    ]);
+
+    const resolved = resolvePreset("child", presets, tempDir);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "compressor",
+      "filter",
+      "de-esser",
+    ]);
+  });
+
+  it("falls back to appending when `before:` anchor is not in the chain", () => {
+    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
+    writePresetJson("fx/child_add.json", "AU: kHs Filter (Kilohearts)", paramsB);
+
+    const presets = new Map<string, PresetDefinition>([
+      ["parent", {
+        name: "parent",
+        fxChainFile: "fx/parent.json",
+        plugins: [{ id: "de-esser" }],
+      }],
+      ["child", {
+        name: "child",
+        extends: "parent",
+        fxChainFile: "fx/child_add.json",
+        add: [{ id: "filter", before: "non-existent-slot" }],
+      }],
+    ]);
+
+    const resolved = resolvePreset("child", presets, tempDir);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["de-esser", "filter"]);
+  });
+
   it("sets origin to root preset for root plugins", () => {
     writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
 

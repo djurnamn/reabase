@@ -107,18 +107,18 @@ export function status(reabasePath: string): StatusResult {
 
       // Compare: current vs. snapshot (local changes)
       const localDiff = diffFxChains(snapshot.fxChain, currentChain);
-      const localChanges = localDiff.filter(
-        (d) => d.type !== "unchanged"
-      ).length;
+      const localChanges =
+        localDiff.actions.filter((d) => d.type !== "unchanged").length +
+        (localDiff.reordered ? 1 : 0);
 
       // Compare: snapshot vs. current preset (upstream changes)
       const upstreamDiff = diffFxChains(
         snapshot.fxChain,
         resolvedPreset.fxChain
       );
-      const upstreamChanges = upstreamDiff.filter(
-        (d) => d.type !== "unchanged"
-      ).length;
+      const upstreamChanges =
+        upstreamDiff.actions.filter((d) => d.type !== "unchanged").length +
+        (upstreamDiff.reordered ? 1 : 0);
 
       let statusValue: TrackStatus["status"];
       if (localChanges > 0 && upstreamChanges > 0) {

@@ -10,6 +10,7 @@ import {
   setExtState,
 } from "../parser/helpers.js";
 import { captureFxChain, enrichWithParameters, hashParameters } from "../snapshot/capture.js";
+import { chainsReordered } from "../snapshot/diff.js";
 import { normalizeBlobForComparison } from "../snapshot/normalize.js";
 import { parsePresetFxChain, serializePresetFxChain } from "../preset/rfxchain.js";
 import { readSnapshot, writeSnapshot } from "../snapshot/store.js";
@@ -214,10 +215,11 @@ export function inspectTrack(
   };
 
   // Determine status from merge actions.
-  // Only count keep_local (preset-managed plugin modified locally) as a local change.
-  // add_local (unmanaged plugins on the track) is expected and doesn't affect status.
+  // Any local deviation from the preset counts as a local change: modified
+  // plugins (keep_local), locally removed plugins (remove_local), and
+  // plugins on the track that aren't in the preset (add_local).
   let localChanged = merge.actions.some(
-    (a) => a.type === "keep_local" || a.type === "remove_local"
+    (a) => a.type === "keep_local" || a.type === "remove_local" || a.type === "add_local"
   );
   let upstreamChanged = merge.actions.some(
     (a) => a.type === "use_new_base" || a.type === "add_base" || a.type === "remove"
@@ -246,30 +248,22 @@ export function inspectTrack(
     }
   }
 
-  // Detect order changes: compare slotId ordering of managed plugins.
-  const resolvedSlotIds = new Set(resolvedPreset.fxChain.map((fx) => fx.slotId));
-  const snapshotOrder = snapshot.fxChain.map((fx) => fx.slotId);
-  const currentOrder = currentChain
-    .filter((fx) => resolvedSlotIds.has(fx.slotId))
-    .map((fx) => fx.slotId);
-  const presetOrder = resolvedPreset.fxChain.map((fx) => fx.slotId);
-
-  // Local reorder: user dragged plugins to a different order (always detect)
-  const localReordered = snapshotOrder.join(",") !== currentOrder.join(",")
-    && snapshotOrder.length === currentOrder.length;
-  if (localReordered) localChanged = true;
+  // Detect order changes via the shared diff helper. `chainsReordered`
+  // compares the relative ordering of slot IDs present in BOTH chains, so
+  // local-only additions and locally-removed slots don't muddy the signal.
+  if (chainsReordered(snapshot.fxChain, currentChain)) {
+    localChanged = true;
+  }
 
   // Upstream reorder: preset defines a different order than the snapshot.
-  // Only flag when there are actual state changes too — otherwise the order
-  // difference is just the preset resolver outputting in parent-first order
-  // which naturally differs from track order for child presets.
-  const hasStateChanges = merge.actions.some(
-    (a) => a.type !== "keep_base" && a.type !== "add_local"
+  // Only flag when there are actual upstream state changes too — a pure
+  // local-only change (keep_local / remove_local / parameter tweak) must not
+  // get re-reported as upstream just because preset order looks different.
+  const hasUpstreamStateChanges = merge.actions.some(
+    (a) => a.type === "use_new_base" || a.type === "add_base" || a.type === "remove"
   );
-  if (hasStateChanges) {
-    const upstreamReordered = snapshotOrder.join(",") !== presetOrder.join(",")
-      && snapshotOrder.length === presetOrder.length;
-    if (upstreamReordered) upstreamChanged = true;
+  if (hasUpstreamStateChanges && chainsReordered(snapshot.fxChain, resolvedPreset.fxChain)) {
+    upstreamChanged = true;
   }
   const hasConflicts = merge.hasConflicts;
 
@@ -790,16 +784,16 @@ export function updatePresets(
     const definition = presets.get(presetNameInChain);
     if (!definition) continue;
 
-    // Collect current fingerprints for owned slotIds (preserve order from current chain)
-    const ownedFingerprints = currentChain.filter((fx) =>
-      ownedSlotIds.includes(fx.slotId)
-    );
-
     const isRoot = i === 0;
     if (isRoot) {
+      // Root preset: just collect the owned plugins in chain order.
+      const ownedFingerprints = currentChain.filter((fx) =>
+        ownedSlotIds.includes(fx.slotId)
+      );
       updateRootPreset(presetsDirectory, definition, ownedFingerprints);
     } else {
-      // Build parent chain by resolving up to (but not including) this level
+      // Child preset: pass the full chain so the writer can pick correct
+      // before/after anchors relative to parent slots.
       const parentPresetName = inheritanceChain[i - 1];
       const parentResolved = resolvePreset(
         parentPresetName,
@@ -810,7 +804,8 @@ export function updatePresets(
         presetsDirectory,
         definition,
         parentResolved.fxChain,
-        ownedFingerprints
+        currentChain,
+        ownedSlotIds
       );
     }
 

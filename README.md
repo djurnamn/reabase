@@ -125,7 +125,11 @@ remove:
 add:
   - id: exciter
     after: de-esser
+  - id: input-filter
+    before: creative-multiband
 ```
+
+`add` entries place the new slot relative to a slot already in the chain at the time the entry is processed. Use `after:` to splice immediately after the named anchor, `before:` to splice immediately before. The two are mutually exclusive on a single entry; with neither, the slot appends to the end of the chain.
 
 ## How sync works
 
@@ -139,6 +143,8 @@ For each track in your REAPER projects that has a `reabase_preset` ext state:
 4. Diff snapshot vs. current → local changes
 5. Diff snapshot vs. preset → upstream changes
 6. Report: `up-to-date` | `modified` | `upstream-changes` | `conflict`
+
+Diffs are order-aware: if shared slots appear in different orders between two chains, that counts as a change. Two tracks bound to the same preset can't both report `up-to-date` while showing different plugin orders.
 
 ### 2. Sync planning (`reabase sync`)
 
@@ -161,6 +167,8 @@ Each plugin gets one of these actions:
 - **remove** — plugin removed upstream, unchanged locally
 - **remove_local** — plugin removed locally, unchanged in preset
 - **conflict** — both sides changed differently (requires resolution)
+
+Order is decided separately from per-slot content. If the user has reordered the track's shared slots relative to the snapshot, the merge takes the local order as the spine — the manual reorder survives sync, even if status reports the chain as out-of-order vs the preset (a stable deviation, by design). Otherwise the new preset's order is the spine, and upstream reorders flow through. Slots that survive but aren't on the spine (preset additions when the spine is local, local additions when the spine is preset) are injected next to their closest already-placed neighbour in the alternate ordering, so `after:` / `before:` intent is honoured even after a reorder.
 
 ### 3. Execution
 
@@ -206,7 +214,7 @@ Duplicates get numeric suffixes: `khs-snap-heap`, `khs-snap-heap-2`, etc.
 A **slot map** stored in REAPER's `P_EXT` persists these assignments. On capture, a three-pass matching algorithm reassigns slot IDs:
 
 1. **Exact match** — same plugin identity AND same state hash → use stored slot ID
-2. **Identity match** — same plugin, different state (user tweaked it) → assign by closest position
+2. **Identity match** — same plugin, different state (user tweaked it) → pair the Nth occurrence of that identity in the captured chain with the Nth unused occurrence in the snapshot. Stable under independent state tweaks: tweaking a plugin's parameters doesn't move it in the chain, so "the second filter" stays "the second filter."
 3. **No match** — new unmanaged plugin → auto-generate a slot ID
 
 This means diffs, merges, and preset inheritance all operate on stable identities rather than fragile positional indices.

@@ -517,7 +517,6 @@ local function check_track_change()
       if chunk then
         local hash = quick_hash(chunk)
         if hash ~= state.last_chunk_hash then
-          log("poll: chunk changed! old_hash=" .. state.last_chunk_hash .. " new_hash=" .. hash)
           state.last_chunk_hash = hash
           state.needs_refresh = "poll"
         end
@@ -571,44 +570,45 @@ local function assign_preset(preset_name, replace, keep_both)
 
   log("  re-read chunk from REAPER: " .. #reaper_chunk .. " bytes")
 
-  -- Replace mode: apply the resolved chain to overwrite existing FX
+  -- Replace mode: apply the preset's resolved chain to overwrite existing FX.
+  -- We deliberately use the preset's chain (inspect_result.resolvedChain), not
+  -- the three-way merge result (inspect_result.merge.resolvedChain). The merge
+  -- factors in local history — for example, a slot that's in the snapshot and
+  -- preset but not on the track gets classified as remove_local and dropped
+  -- from the merged chain. Replace means "make this track match the preset
+  -- exactly," so local removals must not get a vote here.
   if replace then
     local inspect_result, inspect_err = bridge.inspect_track(reaper_chunk, state.reabase_path, capture_fx_parameters(state.track))
-    if inspect_result and inspect_result.merge and inspect_result.merge.resolvedChain then
-      local apply_result, apply_err = bridge.apply_chunk(reaper_chunk, inspect_result.merge.resolvedChain)
+    if inspect_result and inspect_result.resolvedChain then
+      local apply_result, apply_err = bridge.apply_chunk(reaper_chunk, inspect_result.resolvedChain)
       if apply_result then
         set_track_chunk(state.track, apply_result.modifiedChunk)
-        -- Apply parameters after a frame for FX to initialize, then snapshot
-        if apply_result.parameterMaps and #apply_result.parameterMaps > 0 then
-          apply_fx_parameters(state.track, apply_result.parameterMaps, function()
-            -- Snapshot AFTER params are applied so hashes match
-            local post_param_chunk = get_track_chunk(state.track)
-            if post_param_chunk then
-              local snap_chunk = bridge.snapshot(post_param_chunk, preset_name, state.reabase_path, capture_fx_parameters(state.track))
-              if snap_chunk then
-                set_track_chunk(state.track, snap_chunk)
-                log("  replace: snapshot done after param apply")
-              end
+        -- Always defer the snapshot. AU plugins loading state from a base64
+        -- stateBlob via SetTrackStateChunk aren't fully initialised
+        -- synchronously, so reading params with TrackFX_GetParam right away
+        -- can return defaults rather than the loaded preset values. The
+        -- two-pass deferral in apply_fx_parameters gives plugins a frame to
+        -- settle before we capture params for the snapshot. parameterMaps
+        -- may be empty (no-op apply), but the deferral itself still matters.
+        apply_fx_parameters(state.track, apply_result.parameterMaps or {}, function()
+          local post_param_chunk = get_track_chunk(state.track)
+          if post_param_chunk then
+            local snap_chunk = bridge.snapshot(post_param_chunk, preset_name, state.reabase_path, capture_fx_parameters(state.track))
+            if snap_chunk then
+              set_track_chunk(state.track, snap_chunk)
+              log("  replace: snapshot done after param apply")
             end
-            state.selected_tab = nil
-            state.previous_tab = nil
-            state.pending_assignments = {}
-            state.has_pending_changes = false
-            state.status_message = "Preset set to '" .. preset_name .. "'"
-            state.status_is_error = false
-            state.needs_refresh = true
-          end)
-          reaper.Undo_EndBlock("reabase: assign preset '" .. preset_name .. "'", -1)
-          return -- early return; the deferred callback handles the rest
-        end
-        reaper_chunk = get_track_chunk(state.track)
-        if not reaper_chunk then
-          state.status_message = "Preset assigned (replace), but failed to re-read after apply"
-          state.status_is_error = true
+          end
+          state.selected_tab = nil
+          state.previous_tab = nil
+          state.pending_assignments = {}
+          state.has_pending_changes = false
+          state.status_message = "Preset set to '" .. preset_name .. "'"
+          state.status_is_error = false
           state.needs_refresh = true
-          return
-        end
-        log("  replace: applied resolved chain, re-read " .. #reaper_chunk .. " bytes")
+        end)
+        reaper.Undo_EndBlock("reabase: assign preset '" .. preset_name .. "'", -1)
+        return -- early return; the deferred callback handles the rest
       else
         log("  replace: apply_chunk failed: " .. (apply_err or "unknown"))
       end
@@ -1657,6 +1657,7 @@ local function render_fx_table()
     add_local    = { icon = icons.CIRCLE_PLUS,        color = 0x4CAF50FF, tip = "Added locally" },
     add_base     = { icon = icons.CIRCLE_ARROW_DOWN,  color = 0x2196F3FF, tip = "Added by preset" },
     remove       = { icon = icons.CIRCLE_X,           color = 0xF44336FF, tip = "Removed" },
+    remove_local = { icon = icons.CIRCLE_X,           color = 0xFFC107FF, tip = "Deleted locally" },
     conflict     = { icon = icons.CIRCLE_ALERT,       color = 0xF44336FF, tip = "Conflict: both sides changed" },
   }
 
@@ -1687,7 +1688,7 @@ local function render_fx_table()
     reaper.ImGui_TableSetupColumn(ctx, "Plugin",  COL_STRETCH)
     reaper.ImGui_TableSetupColumn(ctx, "Type",    COL_FIXED, 40)
     reaper.ImGui_TableSetupColumn(ctx, "",        COL_FIXED, 30)
-    reaper.ImGui_TableSetupColumn(ctx, "",        COL_FIXED, 60)
+    reaper.ImGui_TableSetupColumn(ctx, "",        COL_FIXED, 80)
 
     -- Header row — uses a normal row so height matches data rows
     reaper.ImGui_TableNextRow(ctx)
@@ -1783,6 +1784,13 @@ local function render_fx_table()
       return false
     end
 
+    -- Build duplicate name lookup: pluginName -> count
+    local name_counts = {}
+    for _, fx in ipairs(chain) do
+      local name = fx.pluginName or ""
+      name_counts[name] = (name_counts[name] or 0) + 1
+    end
+
     -- ─── Data rows ───
     local fx_count = #chain
     for i, fx in ipairs(chain) do
@@ -1869,14 +1877,20 @@ local function render_fx_table()
 
       -- Plugin name (clickable to open FX UI)
       reaper.ImGui_TableSetColumnIndex(ctx, 2)
+      local plugin_label = fx.pluginName or ""
       if state.track then
         reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), 0xCCCCCCFF)
-        if reaper.ImGui_Selectable(ctx, (fx.pluginName or "") .. "##fx_open_" .. i, false) then
+        if reaper.ImGui_Selectable(ctx, plugin_label .. "##fx_open_" .. i, false) then
           reaper.TrackFX_Show(state.track, i - 1, 3)
         end
         reaper.ImGui_PopStyleColor(ctx)
       else
-        reaper.ImGui_Text(ctx, fx.pluginName or "")
+        reaper.ImGui_Text(ctx, plugin_label)
+      end
+      -- Show slotId suffix for duplicate plugin names
+      if name_counts[plugin_label] and name_counts[plugin_label] > 1 and fx.slotId then
+        reaper.ImGui_SameLine(ctx, 0, 6)
+        reaper.ImGui_TextDisabled(ctx, fx.slotId)
       end
 
       -- Type
@@ -1951,7 +1965,7 @@ local function render_fx_table()
           reaper.ImGui_SameLine(ctx, 0, 2)
         end
 
-        -- Revert button (when plugin state differs from preset)
+        -- Revert button (when preset plugin state differs from preset)
         if preset_fp then
           if fx.stateHash and preset_fp.stateHash
               and fx.stateHash ~= preset_fp.stateHash then
@@ -1961,15 +1975,22 @@ local function render_fx_table()
             if reaper.ImGui_IsItemHovered(ctx) then
               reaper.ImGui_SetTooltip(ctx, "Revert to preset state")
             end
+            reaper.ImGui_SameLine(ctx, 0, 2)
           end
-        else
-          -- Remove button (locally added plugin)
-          if icons.square_button(ctx, icons.X, "##rm_" .. i) then
-            state.status_message = "Use 'Revert all local changes' to remove added plugins"
-            state.status_is_error = false
-          end
-          if reaper.ImGui_IsItemHovered(ctx) then
-            reaper.ImGui_SetTooltip(ctx, "Remove locally added plugin")
+        end
+
+        -- Delete button (works for both committed and uncommitted plugins)
+        if icons.square_button(ctx, icons.X, "##rm_" .. i) then
+          reaper.Undo_BeginBlock()
+          reaper.TrackFX_Delete(state.track, i - 1)
+          reaper.Undo_EndBlock("reabase: delete FX '" .. (fx.pluginName or "") .. "'", -1)
+          state.needs_refresh = true
+        end
+        if reaper.ImGui_IsItemHovered(ctx) then
+          if preset_fp then
+            reaper.ImGui_SetTooltip(ctx, "Delete plugin (shows as deleted locally)")
+          else
+            reaper.ImGui_SetTooltip(ctx, "Remove plugin")
           end
         end
       end

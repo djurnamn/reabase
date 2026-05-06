@@ -91,7 +91,12 @@ export function resolvePreset(
         return { ...fx, slotId, origin: levelName };
       });
 
-      // Insert each added plugin at the specified position
+      // Insert each added plugin at the specified position. `after` takes a
+      // slotId and places the new plugin immediately after it; `before` takes
+      // a slotId and places it immediately before. If the named anchor is not
+      // in the chain at this point in resolution (e.g., it's added later in
+      // the same level, or doesn't exist anywhere in the inheritance chain),
+      // we fall back to appending at the end.
       for (const addedPlugin of addedPlugins) {
         const addEntry = levelDefinition.add!.find((a) => a.id === addedPlugin.slotId);
         if (addEntry?.after) {
@@ -100,8 +105,13 @@ export function resolvePreset(
             fxChain.splice(afterIndex + 1, 0, addedPlugin);
             continue;
           }
+        } else if (addEntry?.before) {
+          const beforeIndex = fxChain.findIndex((fx) => fx.slotId === addEntry.before);
+          if (beforeIndex !== -1) {
+            fxChain.splice(beforeIndex, 0, addedPlugin);
+            continue;
+          }
         }
-        // Default: append at end
         fxChain.push(addedPlugin);
       }
     } else if (levelDefinition.fxChainFile && !levelDefinition.add) {

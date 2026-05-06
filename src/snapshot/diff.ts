@@ -6,6 +6,16 @@ export type DiffAction =
   | { type: "added"; fx: FxFingerprint }
   | { type: "removed"; fx: FxFingerprint };
 
+export interface DiffResult {
+  actions: DiffAction[];
+  /**
+   * True when slot IDs present in BOTH chains appear in different relative
+   * orders. Reorder is independent of add/remove: a chain can have both an
+   * added plugin AND a reorder of the slots that survived.
+   */
+  reordered: boolean;
+}
+
 /**
  * Compute a diff between two FX chains.
  * Matches FX plugins by slotId — each slotId is unique so matching is 1:1.
@@ -13,7 +23,7 @@ export type DiffAction =
 export function diffFxChains(
   oldChain: FxFingerprint[],
   newChain: FxFingerprint[]
-): DiffAction[] {
+): DiffResult {
   const actions: DiffAction[] = [];
 
   // Build slot lookup for new chain
@@ -48,5 +58,37 @@ export function diffFxChains(
     }
   }
 
-  return actions;
+  return { actions, reordered: chainsReordered(oldChain, newChain) };
+}
+
+/**
+ * Detect whether the slot IDs present in BOTH chains appear in different
+ * relative orders. Slots present in only one chain are ignored — those are
+ * captured as add/remove actions, not reorders.
+ *
+ * Exposed for callers that need just the order signal without recomputing
+ * the full diff (e.g., the bridge inspect path, which already has merge
+ * actions and just needs to know about reorder).
+ */
+export function chainsReordered(
+  oldChain: FxFingerprint[],
+  newChain: FxFingerprint[]
+): boolean {
+  const newSlotIds = new Set(newChain.map((fx) => fx.slotId));
+  const oldSlotIds = new Set(oldChain.map((fx) => fx.slotId));
+
+  const commonOld: string[] = [];
+  for (const fx of oldChain) {
+    if (newSlotIds.has(fx.slotId)) commonOld.push(fx.slotId);
+  }
+  const commonNew: string[] = [];
+  for (const fx of newChain) {
+    if (oldSlotIds.has(fx.slotId)) commonNew.push(fx.slotId);
+  }
+
+  if (commonOld.length !== commonNew.length) return false;
+  for (let i = 0; i < commonOld.length; i++) {
+    if (commonOld[i] !== commonNew[i]) return true;
+  }
+  return false;
 }

@@ -67,12 +67,17 @@ export function loadPresets(
       );
     }
 
-    // Validate: add entries must have an id
+    // Validate: add entries must have an id and at most one of before/after
     if (parsed.add) {
       for (const entry of parsed.add) {
         if (!entry.id) {
           throw new PresetLoadError(
             `Preset '${parsed.name}' has an 'add' entry without an 'id'`
+          );
+        }
+        if (entry.before && entry.after) {
+          throw new PresetLoadError(
+            `Preset '${parsed.name}' add entry '${entry.id}' has both 'before' and 'after' — set only one`
           );
         }
       }

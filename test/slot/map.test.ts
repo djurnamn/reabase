@@ -121,7 +121,7 @@ describe("resolveSlotIds", () => {
     expect(resolved[1].slotId).toBe("eq");
   });
 
-  it("disambiguates two instances of same plugin by closest position", () => {
+  it("disambiguates two instances of same plugin by Nth-occurrence pairing", () => {
     const chain = [
       makeFx("AU: EQ (Vendor)", "low_v2", "auto-eq"),
       makeFx("AU: EQ (Vendor)", "high_v2", "auto-eq-2"),
@@ -132,10 +132,65 @@ describe("resolveSlotIds", () => {
       "eq-high": { pluginType: "AU", pluginName: "AU: EQ (Vendor)", stateHash: "hash_high" },
     };
 
-    // Both state hashes differ, so pass 2 is used — closest position wins
+    // Both state hashes differ, so pass 2 is used: 1st chain EQ pairs with
+    // 1st unused snapshot EQ slot (eq-low), 2nd with eq-high.
     const resolved = resolveSlotIds(chain, slotMap);
     expect(resolved[0].slotId).toBe("eq-low");
     expect(resolved[1].slotId).toBe("eq-high");
+  });
+
+  it("keeps duplicate-plugin slot identities stable when an unrelated plugin is inserted before them", () => {
+    // Snapshot recorded three EQs at positions 0, 1, 2.
+    // User added a Comp at the front and tweaked all three EQs.
+    // Closest-by-mapIndex would mis-pair (chain pos 1 → eq-B, pos 2 → eq-C, pos 3 → eq-A)
+    // because chain positions no longer line up with snapshot positions.
+    // Nth-occurrence pairs chain EQs to snapshot EQs in order: eq-A, eq-B, eq-C.
+    const chain = [
+      makeFx("AU: Comp (Vendor)", "v1", "auto-comp"),
+      makeFx("AU: EQ (Vendor)", "tweaked_a", "auto-eq"),
+      makeFx("AU: EQ (Vendor)", "tweaked_b", "auto-eq-2"),
+      makeFx("AU: EQ (Vendor)", "tweaked_c", "auto-eq-3"),
+    ];
+
+    const slotMap = {
+      "eq-A": { pluginType: "AU", pluginName: "AU: EQ (Vendor)", stateHash: "hash_a" },
+      "eq-B": { pluginType: "AU", pluginName: "AU: EQ (Vendor)", stateHash: "hash_b" },
+      "eq-C": { pluginType: "AU", pluginName: "AU: EQ (Vendor)", stateHash: "hash_c" },
+    };
+
+    const resolved = resolveSlotIds(chain, slotMap);
+    expect(resolved[0].slotId).toBe("auto-comp"); // unmatched, kept
+    expect(resolved[1].slotId).toBe("eq-A");
+    expect(resolved[2].slotId).toBe("eq-B");
+    expect(resolved[3].slotId).toBe("eq-C");
+  });
+
+  it("preserves duplicate-plugin slot identity when only one of two duplicates is tweaked", () => {
+    // Two khs-filter instances; the user tweaks the second one.
+    // Pass 1 should exact-match the untouched first to filter-A.
+    // Pass 2 should pair the remaining chain occurrence to filter-B (the only
+    // unused identity-matching slot).
+    const chain = [
+      makeFx("AU: kHs Filter (Kilohearts)", "a", "auto-khs-filter"),         // unchanged
+      makeFx("AU: kHs Filter (Kilohearts)", "b_tweaked", "auto-khs-filter-2"), // tweaked
+    ];
+
+    const slotMap = {
+      "filter-A": {
+        pluginType: "AU",
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        stateHash: "hash_a",
+      },
+      "filter-B": {
+        pluginType: "AU",
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        stateHash: "hash_b",
+      },
+    };
+
+    const resolved = resolveSlotIds(chain, slotMap);
+    expect(resolved[0].slotId).toBe("filter-A");
+    expect(resolved[1].slotId).toBe("filter-B");
   });
 
   it("handles empty slot map", () => {

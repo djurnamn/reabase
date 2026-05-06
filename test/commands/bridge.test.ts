@@ -687,9 +687,9 @@ describe("roundtrip: save → assign → snapshot → inspect", () => {
     );
     expect(snapResult.success).toBe(true);
 
-    // 4. Inspect should show up-to-date (add_local for unmanaged plugins doesn't affect status)
+    // 4. Inspect should show modified (unmanaged plugins on the track are local deviations)
     const inspectResult = inspectTrack(snapResult.modifiedChunk, reabasePath);
-    expect(inspectResult.status).toBe("up-to-date");
+    expect(inspectResult.status).toBe("modified");
   });
 });
 

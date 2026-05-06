@@ -220,6 +220,27 @@ add:
     expect(() => loadPresets(tempDir)).toThrow("'add' but does not extend");
   });
 
+  it("throws when an add entry sets both before and after", () => {
+    writePresetYaml("parent.yaml", `
+name: parent
+fxChainFile: fx/parent.rfxchain
+`);
+    writePresetYaml("child.yaml", `
+name: child
+extends: parent
+fxChainFile: fx/child.rfxchain
+add:
+  - id: limiter
+    before: de-esser
+    after: comp
+`);
+
+    expect(() => loadPresets(tempDir)).toThrow(PresetLoadError);
+    expect(() => loadPresets(tempDir)).toThrow(
+      "has both 'before' and 'after'"
+    );
+  });
+
   it("throws when add entries lack fxChainFile", () => {
     writePresetYaml("parent.yaml", `
 name: parent

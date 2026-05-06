@@ -234,6 +234,111 @@ describe("threeWayMerge", () => {
       expect(result.resolvedChain[5].pluginName).toBe("AU: Studio Reverb"); // local addition
     });
 
+    it("preserves a local reorder when preset content is unchanged", () => {
+      const oldBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      const newBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      const local = [makeFx("B"), makeFx("A"), makeFx("C")]; // user moved B first
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "b",
+        "a",
+        "c",
+      ]);
+    });
+
+    it("anchors a preset addition to its preset-relative neighbour when local has reordered", () => {
+      const oldBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      // Preset adds X between B and C — preset order: A, B, X, C
+      const newBase = [makeFx("A"), makeFx("B"), makeFx("X"), makeFx("C")];
+      const local = [makeFx("B"), makeFx("A"), makeFx("C")]; // user moved B first
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      // X's preceding preset-neighbour is B; X lands right after B in local.
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "b",
+        "x",
+        "a",
+        "c",
+      ]);
+    });
+
+    it("preserves local order when preset removes a plugin the user hasn't touched", () => {
+      const oldBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      const newBase = [makeFx("A"), makeFx("C")]; // B removed upstream
+      const local = [makeFx("B"), makeFx("A"), makeFx("C")];
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual(["a", "c"]);
+    });
+
+    it("applies a preset reorder when local has not reordered", () => {
+      const oldBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      const newBase = [makeFx("C"), makeFx("A"), makeFx("B")]; // preset reordered
+      const local = [makeFx("A"), makeFx("B"), makeFx("C")]; // matches old
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "c",
+        "a",
+        "b",
+      ]);
+    });
+
+    it("local order wins when both preset and local reordered differently", () => {
+      const oldBase = [makeFx("A"), makeFx("B"), makeFx("C")];
+      const newBase = [makeFx("C"), makeFx("B"), makeFx("A")]; // preset reverses
+      const local = [makeFx("B"), makeFx("A"), makeFx("C")]; // local picks own order
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "b",
+        "a",
+        "c",
+      ]);
+    });
+
+    it("preserves the position of a local addition placed mid-chain", () => {
+      const oldBase = [makeFx("A"), makeFx("B")];
+      const newBase = [makeFx("A"), makeFx("B")];
+      const local = [makeFx("A"), makeFx("X"), makeFx("B")]; // X inserted between A and B
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "a",
+        "x",
+        "b",
+      ]);
+    });
+
+    it("preserves the position of a local addition placed at the front", () => {
+      const oldBase = [makeFx("A"), makeFx("B")];
+      const newBase = [makeFx("A"), makeFx("B")];
+      const local = [makeFx("X"), makeFx("A"), makeFx("B")]; // X at front
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      // Anchored to following neighbour A → ends up before A.
+      expect(result.resolvedChain.map((fx) => fx.slotId)).toEqual([
+        "x",
+        "a",
+        "b",
+      ]);
+    });
+
     it("handles duplicate plugins (two instances of same EQ with unique slotIds)", () => {
       const oldBase = [makeFx("EQ", "low_cut", "AU", "eq-low"), makeFx("EQ", "high_shelf", "AU", "eq-high")];
       const newBase = [makeFx("EQ", "low_cut_v2", "AU", "eq-low"), makeFx("EQ", "high_shelf", "AU", "eq-high")];

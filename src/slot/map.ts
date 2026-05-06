@@ -63,7 +63,11 @@ export function parseSlotMap(value: string): SlotMap | null {
  *
  * Algorithm:
  * 1. Exact match (identity + stateHash) -> assign stored slotId
- * 2. Identity-only match (TYPE::NAME same, hash differs) -> assign by closest position
+ * 2. Identity-only match (TYPE::NAME same, hash differs) -> pair the Nth
+ *    chain occurrence of that identity with the Nth unused snapshot occurrence.
+ *    Stable under independent state tweaks of duplicate-identity plugins:
+ *    tweaking parameters does not move a plugin's position in the chain, so
+ *    "the second filter" stays "the second filter."
  * 3. No match -> keep auto-generated slotId (unmanaged local plugin)
  */
 export function resolveSlotIds(
@@ -73,7 +77,8 @@ export function resolveSlotIds(
   const usedSlotIds = new Set<string>();
   const result: FxFingerprint[] = new Array(chain.length);
 
-  // Build ordered entries from slot map for position-based matching
+  // slotEntries iteration order is insertion order = snapshot chain order
+  // (buildSlotMap inserts in chain order).
   const slotEntries = Object.entries(slotMap);
 
   // Pass 1: exact match (identity + stateHash)
@@ -101,33 +106,31 @@ export function resolveSlotIds(
     }
   }
 
-  // Pass 2: identity-only match for remaining unmatched
+  // Pass 2: identity-only match by Nth-occurrence pairing.
+  // Group remaining unused slot ids by identity, preserving snapshot chain order
+  // (slotEntries is already in that order). Then iterate unmatched chain
+  // positions in chain order and shift one slot id off each identity's queue.
+  const unusedByIdentity = new Map<string, string[]>();
+  for (const [slotId, entry] of slotEntries) {
+    if (usedSlotIds.has(slotId)) continue;
+    const key = `${entry.pluginType}::${entry.pluginName}`;
+    let queue = unusedByIdentity.get(key);
+    if (!queue) {
+      queue = [];
+      unusedByIdentity.set(key, queue);
+    }
+    queue.push(slotId);
+  }
+
   const stillUnmatched: number[] = [];
   for (const i of unmatched) {
     const fx = chain[i];
-
-    // Find all slot map entries with the same identity that haven't been used
-    const candidates: Array<{ slotId: string; mapIndex: number }> = [];
-    for (let j = 0; j < slotEntries.length; j++) {
-      const [slotId, entry] = slotEntries[j];
-      if (usedSlotIds.has(slotId)) continue;
-      if (
-        entry.pluginType === fx.pluginType &&
-        entry.pluginName === fx.pluginName
-      ) {
-        candidates.push({ slotId, mapIndex: j });
-      }
-    }
-
-    if (candidates.length > 0) {
-      // Pick the closest by position
-      const closest = candidates.reduce((best, candidate) =>
-        Math.abs(candidate.mapIndex - i) < Math.abs(best.mapIndex - i)
-          ? candidate
-          : best
-      );
-      result[i] = { ...fx, slotId: closest.slotId };
-      usedSlotIds.add(closest.slotId);
+    const key = `${fx.pluginType}::${fx.pluginName}`;
+    const queue = unusedByIdentity.get(key);
+    if (queue && queue.length > 0) {
+      const slotId = queue.shift()!;
+      result[i] = { ...fx, slotId };
+      usedSlotIds.add(slotId);
     } else {
       stillUnmatched.push(i);
     }
