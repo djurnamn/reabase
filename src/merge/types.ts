@@ -8,6 +8,9 @@ export type MergeAction =
   | { type: "add_base"; fx: FxFingerprint }
   | { type: "remove"; pluginName: string; pluginType: string; slotId?: string }
   | { type: "remove_local"; fx: FxFingerprint }
+  /** Same plugin: local edited some params, upstream edited disjoint params.
+   *  fx carries the merged params layered on local's stateBlob. */
+  | { type: "merge_params"; fx: FxFingerprint }
   | {
       type: "conflict";
       local: FxFingerprint;

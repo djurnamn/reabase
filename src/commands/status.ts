@@ -6,6 +6,7 @@ import { captureFxChain } from "../snapshot/capture.js";
 import { findRppFiles } from "../utilities/files.js";
 import { diffFxChains } from "../snapshot/diff.js";
 import { readSnapshot } from "../snapshot/store.js";
+import { adoptSlotMapAsBaselineIfIntact } from "../snapshot/adopt.js";
 import { loadPresets } from "../preset/loader.js";
 import { resolvePreset } from "../preset/resolver.js";
 import { parseSlotMap, resolveSlotIds } from "../slot/map.js";
@@ -64,19 +65,7 @@ export function status(reabasePath: string): StatusResult {
         `${(trackGuid ?? "unnamed").replace(/[{}]/g, "").toLowerCase()}.json`
       );
 
-      const snapshot = readSnapshot(snapshotPath);
-      if (!snapshot) {
-        tracks.push({
-          trackName,
-          trackGuid,
-          preset,
-          projectPath: relativeProjectPath,
-          status: "no-snapshot",
-          localChanges: 0,
-          upstreamChanges: 0,
-        });
-        continue;
-      }
+      let snapshot = readSnapshot(snapshotPath);
 
       // Capture current state, resolving slotIds from stored slot map
       let currentChain = captureFxChain(track);
@@ -99,6 +88,36 @@ export function status(reabasePath: string): StatusResult {
           preset,
           projectPath: relativeProjectPath,
           status: "unresolvable-preset",
+          localChanges: 0,
+          upstreamChanges: 0,
+        });
+        continue;
+      }
+
+      if (!snapshot) {
+        // Bug 1: a duplicated preset-bound track has slot_map + chain
+        // copied via REAPER, but no snapshot at the new GUID. If the slot
+        // map's hashes still match the live chain, adopt it as the new
+        // baseline so status doesn't falsely report "Not yet synced".
+        snapshot = adoptSlotMapAsBaselineIfIntact({
+          trackName,
+          trackGuid,
+          preset,
+          presetVersion: resolvedPreset.version,
+          slotMapJson,
+          currentChain,
+          resolvedPresetSlotIds: new Set(resolvedPreset.fxChain.map((fx) => fx.slotId)),
+          snapshotPath,
+        });
+      }
+
+      if (!snapshot) {
+        tracks.push({
+          trackName,
+          trackGuid,
+          preset,
+          projectPath: relativeProjectPath,
+          status: "no-snapshot",
           localChanges: 0,
           upstreamChanges: 0,
         });

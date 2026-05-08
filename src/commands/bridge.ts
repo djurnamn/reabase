@@ -12,6 +12,7 @@ import {
 import { captureFxChain, enrichWithParameters, hashParameters } from "../snapshot/capture.js";
 import { chainsReordered } from "../snapshot/diff.js";
 import { normalizeBlobForComparison } from "../snapshot/normalize.js";
+import { adoptSlotMapAsBaselineIfIntact } from "../snapshot/adopt.js";
 import { parsePresetFxChain, serializePresetFxChain } from "../preset/rfxchain.js";
 import { readSnapshot, writeSnapshot } from "../snapshot/store.js";
 import { loadPresets } from "../preset/loader.js";
@@ -173,7 +174,27 @@ export function inspectTrack(
   // Load snapshot
   const snapshotKey = snapshotKeyFor(trackGuid);
   const snapshotPath = join(snapshotsDirectory, snapshotKey + ".json");
-  const snapshot = readSnapshot(snapshotPath);
+  let snapshot = readSnapshot(snapshotPath);
+
+  if (!snapshot) {
+    // Bug 1: a duplicated preset-bound track inherits reabase_slot_map and
+    // its full FX chain via REAPER's track-copy behavior, but reabase has
+    // no snapshot at the new GUID. If the slot map's stateHashes still
+    // match the current chain, the track is intact relative to its last
+    // baseline — adopt it as the snapshot at the new GUID instead of
+    // falsely reporting "Not yet synced" (which exposes a destructive
+    // "Apply preset changes" button).
+    snapshot = adoptSlotMapAsBaselineIfIntact({
+      trackName: trackName ?? "unnamed",
+      trackGuid: trackGuid ?? "unknown",
+      preset,
+      presetVersion: resolvedPreset.version,
+      slotMapJson,
+      currentChain,
+      resolvedPresetSlotIds: new Set(resolvedPreset.fxChain.map((fx) => fx.slotId)),
+      snapshotPath,
+    });
+  }
 
   if (!snapshot) {
     // First sync — merge from empty base
@@ -197,6 +218,14 @@ export function inspectTrack(
     resolvedPreset.fxChain,
     currentChain
   );
+
+  // Bug 4: surface blob-only changes at per-plugin granularity. The merge
+  // hashes only the parameter map, so a plugin whose params match snapshot
+  // but whose stateBlob differs (e.g., RS5K loading a different sample
+  // file) lands as keep_base. Walk the keep_base actions, compare normalized
+  // blobs, and promote to keep_local where they diverge so the UI row and
+  // track status both reflect the local edit.
+  promoteBlobOnlyChangesToKeepLocal(merge, snapshot.fxChain, currentChain);
 
   // Build debug info: hash comparison and blob format diagnostics
   const debug = {
@@ -222,31 +251,12 @@ export function inspectTrack(
     (a) => a.type === "keep_local" || a.type === "remove_local" || a.type === "add_local"
   );
   let upstreamChanged = merge.actions.some(
-    (a) => a.type === "use_new_base" || a.type === "add_base" || a.type === "remove"
+    (a) =>
+      a.type === "use_new_base" ||
+      a.type === "add_base" ||
+      a.type === "remove" ||
+      a.type === "merge_params"
   );
-
-  // Detect hidden state changes: for plugins where params match (keep_base),
-  // compare normalized blobs to catch internal state changes not exposed via
-  // TrackFX_GetParam (e.g., Snap Heap module configurations, multiband routing).
-  // Blobs are normalized per plugin type to strip non-deterministic host metadata.
-  if (!localChanged) {
-    const snapshotBySlot = new Map(snapshot.fxChain.map((fx) => [fx.slotId, fx]));
-    const currentBySlot = new Map(currentChain.map((fx) => [fx.slotId, fx]));
-    for (const action of merge.actions) {
-      if (action.type === "keep_base") {
-        const snapshotFx = snapshotBySlot.get(action.fx.slotId);
-        const currentFx = currentBySlot.get(action.fx.slotId);
-        if (snapshotFx?.stateBlob && currentFx?.stateBlob) {
-          const normalizedSnapshot = normalizeBlobForComparison(snapshotFx.stateBlob, snapshotFx.pluginType);
-          const normalizedCurrent = normalizeBlobForComparison(currentFx.stateBlob, currentFx.pluginType);
-          if (normalizedSnapshot !== normalizedCurrent) {
-            localChanged = true;
-            break;
-          }
-        }
-      }
-    }
-  }
 
   // Detect order changes via the shared diff helper. `chainsReordered`
   // compares the relative ordering of slot IDs present in BOTH chains, so
@@ -256,13 +266,10 @@ export function inspectTrack(
   }
 
   // Upstream reorder: preset defines a different order than the snapshot.
-  // Only flag when there are actual upstream state changes too — a pure
-  // local-only change (keep_local / remove_local / parameter tweak) must not
-  // get re-reported as upstream just because preset order looks different.
-  const hasUpstreamStateChanges = merge.actions.some(
-    (a) => a.type === "use_new_base" || a.type === "add_base" || a.type === "remove"
-  );
-  if (hasUpstreamStateChanges && chainsReordered(snapshot.fxChain, resolvedPreset.fxChain)) {
+  // Pure-reorder upstream changes must propagate through sync (Bug 3), so
+  // we flag any preset reorder vs snapshot as upstream — even when there
+  // are no per-plugin state changes alongside it.
+  if (chainsReordered(snapshot.fxChain, resolvedPreset.fxChain)) {
     upstreamChanged = true;
   }
   const hasConflicts = merge.hasConflicts;
@@ -1223,6 +1230,52 @@ function findChildPresetForSlot(
   throw new Error(
     `No child preset found with ${mode} for slotId '${slotId}' in inheritance chain [${inheritanceChain.join(", ")}]`
   );
+}
+
+// ─── blob-only change promotion (Bug 4) ──────────────────────────
+
+/**
+ * Walk the merge's keep_base actions and, for any plugin whose normalized
+ * stateBlob has changed since snapshot, promote the action (and the entry
+ * in resolvedChain) to keep_local. This surfaces hidden state edits — like
+ * a sample swap inside RS5K — at the per-plugin row, not just at the
+ * track-level summary. Mutates `merge` in place.
+ */
+function promoteBlobOnlyChangesToKeepLocal(
+  merge: MergeResult,
+  snapshotChain: FxFingerprint[],
+  currentChain: FxFingerprint[]
+): void {
+  const snapshotBySlot = new Map(snapshotChain.map((fx) => [fx.slotId, fx]));
+  const currentBySlot = new Map(currentChain.map((fx) => [fx.slotId, fx]));
+  const resolvedBySlot = new Map(
+    merge.resolvedChain.map((fx, idx) => [fx.slotId, idx] as const)
+  );
+
+  for (let i = 0; i < merge.actions.length; i++) {
+    const action = merge.actions[i];
+    if (action.type !== "keep_base") continue;
+
+    const snapshotFx = snapshotBySlot.get(action.fx.slotId);
+    const currentFx = currentBySlot.get(action.fx.slotId);
+    if (!snapshotFx?.stateBlob || !currentFx?.stateBlob) continue;
+
+    const normalizedSnapshot = normalizeBlobForComparison(
+      snapshotFx.stateBlob,
+      snapshotFx.pluginType
+    );
+    const normalizedCurrent = normalizeBlobForComparison(
+      currentFx.stateBlob,
+      currentFx.pluginType
+    );
+    if (normalizedSnapshot === normalizedCurrent) continue;
+
+    merge.actions[i] = { type: "keep_local", fx: currentFx };
+    const resolvedIdx = resolvedBySlot.get(action.fx.slotId);
+    if (resolvedIdx !== undefined) {
+      merge.resolvedChain[resolvedIdx] = currentFx;
+    }
+  }
 }
 
 // ─── snapshot key ────────────────────────────────────────────────

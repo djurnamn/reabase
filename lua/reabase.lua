@@ -216,6 +216,102 @@ local function set_fx_parameters(track, parameter_maps)
   return applied
 end
 
+--- Map slotId → preset parameters from a resolved preset chain.
+---@param resolved_chain table[]|nil
+---@return table<string, table>
+local function preset_params_by_slot(resolved_chain)
+  local map = {}
+  if resolved_chain then
+    for _, fx in ipairs(resolved_chain) do
+      if fx.slotId then map[fx.slotId] = fx.parameters end
+    end
+  end
+  return map
+end
+
+--- Map slotId → 0-based FX index from a currentChain.
+---@param current_chain table[]|nil
+---@return table<string, number>
+local function slot_to_fx_index(current_chain)
+  local map = {}
+  if current_chain then
+    for idx, fx in ipairs(current_chain) do
+      if fx.slotId then map[fx.slotId] = idx - 1 end
+    end
+  end
+  return map
+end
+
+--- Capture the track's current fx parameters, but for any plugin that the
+--- merge marked as `merge_params` (per-parameter three-way merge of local +
+--- preset edits), substitute the preset's parameters in place of the live
+--- merged values. The snapshot written from these parameters then matches
+--- the preset baseline for those slots, so the local edits the merge
+--- preserved still appear as a local divergence on the next inspect — the
+--- alternative would be to bake them into the baseline and lose them to a
+--- "use_new_base" the next time sync runs.
+---@param track MediaTrack
+---@param merge_actions table[]|nil
+---@param resolved_chain table[]|nil  preset's resolved chain (preset.fxChain)
+---@param current_chain table[]|nil   track's currentChain
+---@return table[] fx_parameters with overrides applied
+local function capture_fx_parameters_with_baseline_overrides(
+  track, merge_actions, resolved_chain, current_chain
+)
+  local fx_parameters = capture_fx_parameters(track)
+  if not merge_actions or not resolved_chain or not current_chain then
+    return fx_parameters
+  end
+
+  local preset_params = preset_params_by_slot(resolved_chain)
+  local slot_index = slot_to_fx_index(current_chain)
+
+  for _, action in ipairs(merge_actions) do
+    if action.type == "merge_params" and action.fx and action.fx.slotId then
+      local target_params = preset_params[action.fx.slotId]
+      local fx_index = slot_index[action.fx.slotId]
+      if target_params and fx_index ~= nil then
+        fx_parameters[fx_index + 1] = target_params
+      end
+    end
+  end
+
+  return fx_parameters
+end
+
+--- Capture the track's current fx parameters, but for every preset-managed
+--- slot substitute the preset's parameters. Used after a per-plugin revert
+--- so the snapshot baseline reflects the clean preset state for ALL preset
+--- slots — that way the just-reverted slot resolves to keep_base on next
+--- inspect, while any other slots still carrying local tweaks resolve to
+--- keep_local against this clean baseline (instead of use_new_base, which
+--- would have clobbered them on the next sync).
+---@param track MediaTrack
+---@param resolved_chain table[]|nil  preset's resolved chain
+---@param current_chain table[]|nil   track's currentChain
+---@return table[] fx_parameters
+local function capture_fx_parameters_as_preset_baseline(
+  track, resolved_chain, current_chain
+)
+  local fx_parameters = capture_fx_parameters(track)
+  if not resolved_chain or not current_chain then
+    return fx_parameters
+  end
+
+  local preset_params = preset_params_by_slot(resolved_chain)
+
+  for idx, fx in ipairs(current_chain) do
+    if fx.slotId then
+      local target_params = preset_params[fx.slotId]
+      if target_params then
+        fx_parameters[idx] = target_params
+      end
+    end
+  end
+
+  return fx_parameters
+end
+
 --- Apply parameter maps to FX on a track via TrackFX_SetParam.
 --- Does two passes with a frame gap between them: the first pass sets all params,
 --- the second re-applies after plugins have had a frame to initialize their modes
@@ -818,15 +914,16 @@ local function apply_preset()
 
   -- Determine apply strategy:
   -- - Structural changes (add/remove/reorder) → full apply_chunk rebuild
-  -- - State-only changes (use_new_base) → surgical per-slot revert_plugin
+  -- - State-only changes (use_new_base, merge_params) → surgical per-slot
+  --   parameter writeback using action.fx.parameters directly. We can't
+  --   route merge_params through bridge.revert_plugin because that fetches
+  --   clean preset params and would clobber the local edits the per-param
+  --   merge intentionally preserved.
   local has_structural_changes = false
-  local slots_to_update = {}
   for _, action in ipairs(state.inspect.merge.actions) do
     if action.type == "add_base" or action.type == "remove" then
       has_structural_changes = true
       break
-    elseif action.type == "use_new_base" then
-      slots_to_update[#slots_to_update + 1] = action.fx.slotId
     end
   end
 
@@ -883,19 +980,27 @@ local function apply_preset()
     end
     apply_chunk_and_parameters(state.track, result.modifiedChunk, result.parameterMaps, role, state.reabase_path)
   else
-    -- State-only changes: apply parameter maps via TrackFX_SetParam
+    -- State-only changes: read each affected slot's target parameters
+    -- straight off action.fx — that fingerprint already carries the right
+    -- values for both use_new_base (preset's params) and merge_params
+    -- (per-parameter three-way merge of local + preset).
+    local slot_to_index = {}
+    if state.inspect.currentChain then
+      for idx, fx in ipairs(state.inspect.currentChain) do
+        slot_to_index[fx.slotId] = idx - 1 -- 0-based
+      end
+    end
     local param_maps_by_index = {}
-    for _, slot_id in ipairs(slots_to_update) do
-      log("  reverting slot " .. slot_id .. " to preset state")
-      local result, err = bridge.revert_plugin(state.track_chunk, slot_id, state.reabase_path)
-      if err then
-        log("  ERROR reverting " .. slot_id .. ": " .. err)
-      elseif result and result.pluginIndex ~= nil and result.parameterMap then
-        -- pluginIndex is 0-based from CLI, store as 1-based for Lua array
-        param_maps_by_index[result.pluginIndex + 1] = result.parameterMap
-        log("  got params for FX index " .. result.pluginIndex)
-      else
-        log("  WARNING: revert_plugin returned no pluginIndex or parameterMap for " .. slot_id)
+    for _, action in ipairs(state.inspect.merge.actions) do
+      if action.type == "use_new_base" or action.type == "merge_params" then
+        local plugin_index = slot_to_index[action.fx.slotId]
+        if plugin_index ~= nil and action.fx.parameters then
+          log("  applying params to slot " .. action.fx.slotId
+            .. " (FX index " .. plugin_index .. ", action " .. action.type .. ")")
+          param_maps_by_index[plugin_index + 1] = action.fx.parameters
+        else
+          log("  WARNING: no FX index for slot " .. action.fx.slotId)
+        end
       end
     end
     -- Build a dense array for apply_fx_parameters (nil entries are skipped)
@@ -908,7 +1013,13 @@ local function apply_preset()
       if role then
         local reaper_chunk = get_track_chunk(state.track)
         if reaper_chunk then
-          local snap_chunk = bridge.snapshot(reaper_chunk, role, state.reabase_path, capture_fx_parameters(state.track))
+          local snap_params = capture_fx_parameters_with_baseline_overrides(
+            state.track,
+            state.inspect.merge.actions,
+            state.inspect.resolvedChain,
+            state.inspect.currentChain
+          )
+          local snap_chunk = bridge.snapshot(reaper_chunk, role, state.reabase_path, snap_params)
           if snap_chunk then
             set_track_chunk(state.track, snap_chunk)
           end
@@ -1064,6 +1175,28 @@ local function revert_plugin(slot_id)
       end
     end
   end
+  -- Update the snapshot to the clean preset baseline. Without this, the
+  -- snapshot still reflects whatever (possibly tweaked) state was current
+  -- last time the snapshot was written, so the merge for the just-reverted
+  -- slot resolves to keep_local (track == preset != stale snapshot, "both
+  -- changed same way" branch) and the row mis-reports "Modified locally".
+  -- Writing the preset baseline also keeps any other unrelated local
+  -- tweaks resolving to keep_local rather than getting baked into the
+  -- baseline and then clobbered as use_new_base on the next sync.
+  if state.inspect and state.inspect.preset and state.inspect.resolvedChain then
+    local reaper_chunk = get_track_chunk(state.track)
+    if reaper_chunk then
+      local snap_params = capture_fx_parameters_as_preset_baseline(
+        state.track,
+        state.inspect.resolvedChain,
+        state.inspect.currentChain
+      )
+      local snap_chunk = bridge.snapshot(
+        reaper_chunk, state.inspect.preset, state.reabase_path, snap_params
+      )
+      if snap_chunk then set_track_chunk(state.track, snap_chunk) end
+    end
+  end
   reaper.Undo_EndBlock("reabase: revert plugin '" .. slot_id .. "'", -1)
 
   state.status_message = "Plugin '" .. slot_id .. "' reverted to preset state"
@@ -1214,14 +1347,11 @@ local function update_and_sync_project()
         log("  sync: track " .. i .. " status=" .. (inspect_result and inspect_result.status or inspect_err or "nil"))
         if inspect_result and inspect_result.status == "upstream-changes" and inspect_result.merge then
           -- Collect slots that need updating
-          local slots_to_update = {}
           local has_structural = false
           for _, action in ipairs(inspect_result.merge.actions) do
             if action.type == "add_base" or action.type == "remove" then
               has_structural = true
               break
-            elseif action.type == "use_new_base" then
-              slots_to_update[#slots_to_update + 1] = action.fx.slotId
             end
           end
 
@@ -1259,20 +1389,39 @@ local function update_and_sync_project()
               end
             end
           else
-            -- State-only changes: apply parameters directly
+            -- State-only changes: apply parameters directly.
+            -- Both `use_new_base` (revert to preset) and `merge_params`
+            -- (per-param three-way merge result) carry the target params on
+            -- action.fx, so we can build the param map without round-tripping
+            -- through bridge.revert_plugin.
+            local slot_to_index = {}
+            if inspect_result.currentChain then
+              for idx, fx in ipairs(inspect_result.currentChain) do
+                slot_to_index[fx.slotId] = idx - 1 -- 0-based
+              end
+            end
             local param_maps = {}
-            for _, slot_id in ipairs(slots_to_update) do
-              log("  sync: reverting slot " .. slot_id .. " on track " .. i)
-              local result = bridge.revert_plugin(chunk, slot_id, state.reabase_path)
-              if result and result.pluginIndex ~= nil and result.parameterMap then
-                param_maps[result.pluginIndex + 1] = result.parameterMap -- 0-based to 1-based
+            for _, action in ipairs(inspect_result.merge.actions) do
+              if action.type == "use_new_base" or action.type == "merge_params" then
+                local plugin_index = slot_to_index[action.fx.slotId]
+                if plugin_index ~= nil and action.fx.parameters then
+                  log("  sync: applying params to slot " .. action.fx.slotId
+                    .. " on track " .. i .. " (action " .. action.type .. ")")
+                  param_maps[plugin_index + 1] = action.fx.parameters
+                end
               end
             end
             apply_fx_parameters(track, param_maps, function()
               if sync_preset then
                 local reaper_chunk = get_track_chunk(track)
                 if reaper_chunk then
-                  local snap_chunk = bridge.snapshot(reaper_chunk, sync_preset, state.reabase_path, capture_fx_parameters(track))
+                  local snap_params = capture_fx_parameters_with_baseline_overrides(
+                    track,
+                    inspect_result.merge.actions,
+                    inspect_result.resolvedChain,
+                    inspect_result.currentChain
+                  )
+                  local snap_chunk = bridge.snapshot(reaper_chunk, sync_preset, state.reabase_path, snap_params)
                   if snap_chunk then set_track_chunk(track, snap_chunk) end
                 end
               end
@@ -1653,6 +1802,7 @@ local function render_fx_table()
   local ACTION_ICONS = {
     keep_base    = { icon = icons.CIRCLE,             color = 0x9E9E9EFF, tip = "Unchanged" },
     keep_local   = { icon = icons.CIRCLE_DOT,         color = 0xFFC107FF, tip = "Modified locally" },
+    merge_params = { icon = icons.CIRCLE_ARROW_DOWN,  color = 0x2196F3FF, tip = "Preset update available (auto-merged with local edits)" },
     use_new_base = { icon = icons.CIRCLE_ARROW_DOWN,  color = 0x2196F3FF, tip = "Preset update available" },
     add_local    = { icon = icons.CIRCLE_PLUS,        color = 0x4CAF50FF, tip = "Added locally" },
     add_base     = { icon = icons.CIRCLE_ARROW_DOWN,  color = 0x2196F3FF, tip = "Added by preset" },

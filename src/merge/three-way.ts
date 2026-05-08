@@ -1,4 +1,5 @@
-import type { FxFingerprint } from "../snapshot/types.js";
+import type { FxFingerprint, ParameterValue } from "../snapshot/types.js";
+import { hashParameters } from "../snapshot/capture.js";
 import type { MergeAction, MergeResult } from "./types.js";
 
 function buildLookup(
@@ -203,6 +204,14 @@ function resolveActionForKey(
       // Both changed the same way.
       return { type: "keep_local", fx: localFx };
     }
+    // Both diverged from the snapshot AND from each other at the plugin
+    // hash level. Try a per-parameter three-way merge: if local and upstream
+    // edited disjoint params, fold them together instead of declaring a
+    // plugin-level conflict (Bug 2).
+    const merged = tryMergeParams(oldFx, newFx, localFx);
+    if (merged) {
+      return { type: "merge_params", fx: merged };
+    }
     return {
       type: "conflict",
       local: localFx,
@@ -286,6 +295,7 @@ function getResolvedFx(action: MergeAction): FxFingerprint {
     case "keep_local":
     case "add_local":
     case "add_base":
+    case "merge_params":
       return action.fx;
     case "conflict":
       return action.local; // safe default: keep local version
@@ -293,4 +303,81 @@ function getResolvedFx(action: MergeAction): FxFingerprint {
     case "remove_local":
       throw new Error("Cannot get resolved FX for a remove action");
   }
+}
+
+/**
+ * Per-parameter three-way merge for a single plugin.
+ * Returns a merged fingerprint if every diverging parameter resolves
+ * cleanly (one side edited, the other didn't), or null if at least one
+ * parameter has a real three-way disagreement.
+ *
+ * The merged fingerprint inherits local's stateBlob: Lua applies the
+ * merged params on top of the local plugin via TrackFX_SetParam, so the
+ * blob never needs to round-trip through serialization.
+ */
+function tryMergeParams(
+  oldFx: FxFingerprint,
+  newFx: FxFingerprint,
+  localFx: FxFingerprint
+): FxFingerprint | null {
+  const allKeys = new Set<string>([
+    ...Object.keys(oldFx.parameters),
+    ...Object.keys(newFx.parameters),
+    ...Object.keys(localFx.parameters),
+  ]);
+
+  // No per-parameter data available — divergent stateHashes must be coming
+  // from something we can't see (e.g., stateBlob), so we can't auto-merge.
+  if (allKeys.size === 0) return null;
+
+  const merged: Record<string, ParameterValue> = {};
+  for (const key of allKeys) {
+    const oldP = oldFx.parameters[key];
+    const newP = newFx.parameters[key];
+    const localP = localFx.parameters[key];
+
+    if (newP === undefined && localP === undefined) continue;
+    if (newP === undefined) {
+      merged[key] = localP!;
+      continue;
+    }
+    if (localP === undefined) {
+      merged[key] = newP;
+      continue;
+    }
+
+    if (newP.value === localP.value) {
+      merged[key] = newP;
+      continue;
+    }
+
+    if (oldP === undefined) {
+      // Both sides added the same param with different values.
+      return null;
+    }
+
+    const baseChanged = oldP.value !== newP.value;
+    const localChanged = oldP.value !== localP.value;
+
+    if (baseChanged && !localChanged) {
+      merged[key] = newP;
+      continue;
+    }
+    if (!baseChanged && localChanged) {
+      merged[key] = localP;
+      continue;
+    }
+    if (!baseChanged && !localChanged) {
+      merged[key] = oldP;
+      continue;
+    }
+    // Both edited the same param to different values — real conflict.
+    return null;
+  }
+
+  return {
+    ...localFx,
+    parameters: merged,
+    stateHash: hashParameters(merged),
+  };
 }

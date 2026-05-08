@@ -144,6 +144,8 @@ For each track in your REAPER projects that has a `reabase_preset` ext state:
 5. Diff snapshot vs. preset → upstream changes
 6. Report: `up-to-date` | `modified` | `upstream-changes` | `conflict`
 
+If a track is bound to a preset and has a `reabase_slot_map` but no snapshot at its GUID — the typical state right after duplicating a bound track in REAPER — the slot map's stored hashes are compared against the live chain. When they match, the chain is intact relative to its last baseline, so a fresh snapshot is auto-captured at the new GUID instead of reporting `no-snapshot`. Tracks with real local edits since duplication still fall through to the no-snapshot path.
+
 Diffs are order-aware: if shared slots appear in different orders between two chains, that counts as a change. Two tracks bound to the same preset can't both report `up-to-date` while showing different plugin orders.
 
 ### 2. Sync planning (`reabase sync`)
@@ -152,21 +154,24 @@ For each out-of-date track, run a three-way merge:
 
 ```
 old base (snapshot)    new base (preset)    local (current track)
-        \                    |                    /
-         └──────── three-way merge ──────────────┘
-                         │
-                    MergeResult
+         │                     │                      │
+         └───────────── three-way merge ──────────────┘
+                               │
+                          merge result
 ```
 
 Each plugin gets one of these actions:
 - **keep_base** — unchanged everywhere
 - **use_new_base** — only the preset changed, take the update
 - **keep_local** — only the track changed, preserve the tweak
+- **merge_params** — both sides changed, but on disjoint parameters; the merge folds local and upstream edits into one fingerprint instead of declaring a conflict
 - **add_base** — new plugin added by preset
 - **add_local** — new plugin added locally
 - **remove** — plugin removed upstream, unchanged locally
 - **remove_local** — plugin removed locally, unchanged in preset
-- **conflict** — both sides changed differently (requires resolution)
+- **conflict** — both sides changed the *same* parameter differently (requires resolution)
+
+When local and upstream both touch the same plugin, the merge first checks whether the divergence is parameter-disjoint: e.g. local tweaks `threshold`, upstream bumps `ratio`. In that case the result is a `merge_params` action carrying a fingerprint with both edits applied (parameters merged on top of local's stateBlob), and sync applies it without prompting. Only when at least one parameter has a true three-way disagreement does the action escalate to `conflict`.
 
 Order is decided separately from per-slot content. If the user has reordered the track's shared slots relative to the snapshot, the merge takes the local order as the spine — the manual reorder survives sync, even if status reports the chain as out-of-order vs the preset (a stable deviation, by design). Otherwise the new preset's order is the spine, and upstream reorders flow through. Slots that survive but aren't on the spine (preset additions when the spine is local, local additions when the spine is preset) are injected next to their closest already-placed neighbour in the alternate ordering, so `after:` / `before:` intent is honoured even after a reorder.
 

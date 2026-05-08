@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets, unlinkOverride, linkAsOverride } from "../../src/commands/bridge.js";
@@ -146,6 +146,288 @@ describe("inspectTrack", () => {
     expect(result.status).toBe("unresolvable-preset");
   });
 
+  it("flags blob-only changes per-plugin as keep_local (Bug 4)", () => {
+    // Reproducer for Bug 4: a plugin whose params haven't changed but
+    // whose state blob has (e.g., RS5K loading a different sample).
+    // Track-level status was already correct via the blob fallback; this
+    // pins the per-plugin action so the UI row also surfaces "Modified
+    // locally" instead of "Unchanged".
+    const params = { "0": { name: "p", value: 0.5 } };
+
+    const ORIGINAL_BLOB_CHUNK = `<TRACK {AAAAAAAA-1111-2222-3333-444444444444}
+  NAME RS5K_TEST
+  PEAKCOL 17236731
+  BEAT -1
+  AUTOMODE 0
+  VOLPAN 1 0 -1 -1 1
+  MUTESOLO 0 0 0
+  ISBUS 0 0
+  NCHAN 6
+  FX 1
+  TRACKID {AAAAAAAA-1111-2222-3333-444444444444}
+  MAINSEND 1 0
+  <FXCHAIN
+    SHOW 0
+    LASTSEL -1
+    DOCKED 0
+    BYPASS 0 0 0
+    <AU "AU: ReaSamplOMatic5000 (Cockos)" "Cockos: ReaSamplOMatic5000" "" 0 "" ""
+      U0FNUExFLU9SSUdJTkFMLUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
+    >
+    FLOATPOS 0 0 0 0
+    FXID {07EC70AF-D570-084D-ABA9-825C6F0C365C}
+    WAK 0 0
+  >
+  <EXT
+    reabase_preset rs5k_test
+  >
+>`;
+
+    writePreset("rs5k_test", [
+      { pluginName: "AU: ReaSamplOMatic5000 (Cockos)", pluginType: "AU", slotId: "reasamplomatic5000", parameters: params },
+    ]);
+
+    const snap = snapshotTrack(
+      { trackChunk: ORIGINAL_BLOB_CHUNK, preset: "rs5k_test", fxParameters: [params] },
+      reabasePath
+    );
+    expect(snap.success).toBe(true);
+
+    // Same chunk but the plugin block's blob differs (sample swap).
+    // Params (fxParameters) stay the same so stateHash matches — the only
+    // signal of change is the stateBlob.
+    const SAMPLE_SWAP_CHUNK = snap.modifiedChunk.replace(
+      "U0FNUExFLU9SSUdJTkFMLUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+      "U0FNUExFLU5FV1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1M="
+    );
+
+    const result = inspectTrack(SAMPLE_SWAP_CHUNK, reabasePath, [params]);
+    expect(result.status).toBe("modified");
+    expect(result.merge).not.toBeNull();
+    const samplerAction = result.merge!.actions.find(
+      (a) => "fx" in a && a.fx?.slotId === "reasamplomatic5000"
+    );
+    expect(samplerAction).toBeDefined();
+    expect(samplerAction!.type).toBe("keep_local");
+  });
+
+  it("preserves local tweak as divergence after merge_params apply (Bug 2 followup)", () => {
+    // Reproducer for the apply-path half of Bug 2: when local tweaks one
+    // param and the preset bumps a different one, threeWayMerge produces
+    // a merge_params action with merged params. The fix has two halves:
+    //   1. Apply the merged params to the track (Lua side).
+    //   2. Snapshot using the PRESET's params for that slot, not the
+    //      merged track params, so the local tweak remains visible as a
+    //      local divergence on the next inspect (rather than getting
+    //      baked into the baseline and then clobbered by use_new_base
+    //      next sync — which is what the user observed).
+    // This test exercises (2): the TS roundtrip that mirrors what Lua
+    // does after the apply runs.
+    const presetParams = { "0": { name: "threshold", value: 0.6 }, "1": { name: "ratio", value: 0.4 } };
+    const localParamsBefore = { "0": { name: "threshold", value: 0.5 }, "1": { name: "ratio", value: 0.32 } };
+    // After per-parameter merge: preset's threshold (0.6) + local's ratio (0.32).
+    const mergedParams = { "0": { name: "threshold", value: 0.6 }, "1": { name: "ratio", value: 0.32 } };
+
+    const TWO_PARAM_CHUNK = `<TRACK {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  NAME COMP_TEST
+  PEAKCOL 17236731
+  BEAT -1
+  AUTOMODE 0
+  VOLPAN 1 0 -1 -1 1
+  MUTESOLO 0 0 0
+  ISBUS 0 0
+  NCHAN 6
+  FX 1
+  TRACKID {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  MAINSEND 1 0
+  <FXCHAIN
+    SHOW 0
+    LASTSEL -1
+    DOCKED 0
+    BYPASS 0 0 0
+    <AU "AU: TestComp (TestVendor)" "TestVendor: TestComp" "" 0 "" ""
+    >
+    FLOATPOS 0 0 0 0
+    FXID {07EC70AF-D570-084D-ABA9-825C6F0C365C}
+    WAK 0 0
+  >
+  <EXT
+    reabase_preset comp_test
+  >
+>`;
+
+    // Initial preset has the original (pre-edit) params; both sides will
+    // diverge from these so the merge fires per-parameter.
+    const originalParams = { "0": { name: "threshold", value: 0.5 }, "1": { name: "ratio", value: 0.4 } };
+    writePreset("comp_test", [
+      { pluginName: "AU: TestComp (TestVendor)", pluginType: "AU", slotId: "testcomp", parameters: originalParams },
+    ]);
+
+    // Snapshot the track at the original preset state.
+    const initialSnap = snapshotTrack(
+      { trackChunk: TWO_PARAM_CHUNK, preset: "comp_test", fxParameters: [originalParams] },
+      reabasePath
+    );
+    expect(initialSnap.success).toBe(true);
+
+    // Upstream: preset bumps ratio to 0.4 (oh wait that's same — change to make it diverge).
+    // Use presetParams which has threshold=0.6 (changed from 0.5).
+    writeFileSync(
+      join(reabasePath, "presets", "fx", "comp_test.json"),
+      JSON.stringify([
+        { pluginName: "AU: TestComp (TestVendor)", pluginType: "AU", slotId: "testcomp", parameters: presetParams },
+      ], null, 2),
+      "utf-8"
+    );
+    // Local: user has tweaked ratio (0.4 → 0.32) but kept threshold at 0.5.
+    // Inspect should produce a merge_params action.
+    const beforeApply = inspectTrack(initialSnap.modifiedChunk, reabasePath, [localParamsBefore]);
+    expect(beforeApply.merge!.actions[0].type).toBe("merge_params");
+
+    // Now mirror what Lua does after apply: resnapshot, but for the
+    // merge_params slot pass the PRESET's params instead of the live merged
+    // params. (In the real flow, Lua applies merged params to the track via
+    // TrackFX_SetParam first; here we skip that since we're testing only
+    // the snapshot baseline override.)
+    const resnap = snapshotTrack(
+      { trackChunk: initialSnap.modifiedChunk, preset: "comp_test", fxParameters: [presetParams] },
+      reabasePath
+    );
+    expect(resnap.success).toBe(true);
+
+    // The track itself still carries the merged state (ratio=local, threshold=preset);
+    // re-inspecting with those params must report status "modified" so the
+    // local ratio tweak is visible — and the action must be keep_local, not
+    // use_new_base, so a subsequent sync wouldn't clobber it.
+    const afterApply = inspectTrack(resnap.modifiedChunk, reabasePath, [mergedParams]);
+    expect(afterApply.status).toBe("modified");
+    const compAction = afterApply.merge!.actions.find(
+      (a) => "fx" in a && a.fx?.slotId === "testcomp"
+    );
+    expect(compAction).toBeDefined();
+    expect(compAction!.type).toBe("keep_local");
+  });
+
+  it("per-plugin revert clears that row's status while preserving other tweaks (revert_plugin followup)", () => {
+    // Reproducer: track has two plugins, both tweaked locally. User clicks
+    // the per-plugin "Revert to preset state" button on plugin A. The Lua
+    // revert_plugin flow applies preset params to A via TrackFX_SetParam,
+    // then writes a snapshot whose params equal the PRESET's params for
+    // every preset-managed slot — clean baseline. Result: A resolves to
+    // keep_base (Up to date), B remains keep_local (Modified locally).
+    // Without the snapshot rewrite, A would still report keep_local because
+    // the stale snapshot baseline carries A's old tweak.
+    const presetA = { "0": { name: "p", value: 0.5 } };
+    const presetB = { "0": { name: "p", value: 0.5 } };
+    const tweakedA = { "0": { name: "p", value: 0.9 } };
+    const tweakedB = { "0": { name: "p", value: 0.7 } };
+
+    const TWO_PLUGIN_CHUNK = `<TRACK {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  NAME REVERT_TEST
+  PEAKCOL 17236731
+  BEAT -1
+  AUTOMODE 0
+  VOLPAN 1 0 -1 -1 1
+  MUTESOLO 0 0 0
+  ISBUS 0 0
+  NCHAN 6
+  FX 1
+  TRACKID {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  MAINSEND 1 0
+  <FXCHAIN
+    SHOW 0
+    LASTSEL -1
+    DOCKED 0
+    BYPASS 0 0 0
+    <AU "AU: PluginA (Vendor)" "Vendor: PluginA" "" 0 "" ""
+    >
+    FLOATPOS 0 0 0 0
+    FXID {00000000-0000-0000-0000-AAAAAAAAAAAA}
+    WAK 0 0
+    BYPASS 0 0 0
+    <AU "AU: PluginB (Vendor)" "Vendor: PluginB" "" 0 "" ""
+    >
+    FLOATPOS 0 0 0 0
+    FXID {00000000-0000-0000-0000-BBBBBBBBBBBB}
+    WAK 0 0
+  >
+  <EXT
+    reabase_preset revert_test
+  >
+>`;
+
+    writePreset("revert_test", [
+      { pluginName: "AU: PluginA (Vendor)", pluginType: "AU", slotId: "plugina", parameters: presetA },
+      { pluginName: "AU: PluginB (Vendor)", pluginType: "AU", slotId: "pluginb", parameters: presetB },
+    ]);
+
+    // First snapshot: capture the chunk while BOTH plugins are tweaked.
+    // This is the realistic state for the bug — the user has been working
+    // and the snapshot has drifted off the clean preset baseline.
+    const snapWithTweaks = snapshotTrack(
+      { trackChunk: TWO_PLUGIN_CHUNK, preset: "revert_test", fxParameters: [tweakedA, tweakedB] },
+      reabasePath
+    );
+    expect(snapWithTweaks.success).toBe(true);
+
+    // Mirror Lua revert_plugin: apply preset params to A, leave B tweaked,
+    // and write a fresh snapshot using preset's params for ALL preset slots
+    // (the capture_fx_parameters_as_preset_baseline equivalent).
+    const resnap = snapshotTrack(
+      { trackChunk: snapWithTweaks.modifiedChunk, preset: "revert_test", fxParameters: [presetA, presetB] },
+      reabasePath
+    );
+    expect(resnap.success).toBe(true);
+
+    // The track itself: A reverted to preset, B still tweaked.
+    const result = inspectTrack(resnap.modifiedChunk, reabasePath, [presetA, tweakedB]);
+
+    expect(result.status).toBe("modified");
+    const aAction = result.merge!.actions.find((a) => "fx" in a && a.fx?.slotId === "plugina");
+    const bAction = result.merge!.actions.find((a) => "fx" in a && a.fx?.slotId === "pluginb");
+    expect(aAction?.type).toBe("keep_base");
+    expect(bAction?.type).toBe("keep_local");
+  });
+
+  it("auto-baselines a duplicated preset-bound track when slot map matches (Bug 1)", () => {
+    // Reproducer for Bug 1: a track is duplicated in REAPER, so its P_EXT
+    // (reabase_preset, reabase_slot_map) and FX chain are copied verbatim
+    // — but reabase has no snapshot at the new GUID. Without the fix, status
+    // returns "no-snapshot" and the UI exposes a destructive "Apply preset
+    // changes" button that clobbers the chain.
+    // After the fix: when slot-map state hashes match the current chain,
+    // status is "up-to-date" and a snapshot is auto-captured at the new GUID.
+    const params = { "0": { name: "p", value: 0.5 } };
+
+    writePreset("player_voice", [
+      { pluginName: "AU: T-De-Esser 2 (Techivation)", pluginType: "AU", slotId: "t-de-esser-2", parameters: params },
+    ]);
+
+    // Step 1: snapshot the source track at its original GUID.
+    const sourceSnap = snapshotTrack(
+      { trackChunk: TRACK_CHUNK_WITH_ROLE, preset: "player_voice", fxParameters: [params] },
+      reabasePath
+    );
+    expect(sourceSnap.success).toBe(true);
+
+    // Step 2: simulate REAPER's track duplication — same chunk, same slot
+    // map (carried via P_EXT), same preset, but a fresh GUID.
+    const dupGuid = "{99999999-EEEE-FFFF-0000-111122223333}";
+    const duplicatedChunk = sourceSnap.modifiedChunk
+      .replace(/\{66595AAC-8084-8049-8F26-93FAE19A27C6\}/g, dupGuid);
+
+    // Step 3: inspect the duplicate. With the Bug 1 fix this should be
+    // up-to-date and a fresh snapshot file should appear at the new GUID.
+    const dupGuidKey = dupGuid.replace(/[{}]/g, "").toLowerCase();
+    const dupSnapshotPath = join(reabasePath, "snapshots", `${dupGuidKey}.json`);
+    expect(existsSync(dupSnapshotPath)).toBe(false);
+
+    const result = inspectTrack(duplicatedChunk, reabasePath, [params]);
+
+    expect(result.status).toBe("up-to-date");
+    expect(existsSync(dupSnapshotPath)).toBe(true);
+  });
+
   it("includes inheritanceChain and resolvedChain when preset is assigned", () => {
     const presetPlugins = [
       {
@@ -280,6 +562,109 @@ describe("inspectTrack", () => {
     // Inspect with swapped order — should detect as modified
     const result = inspectTrack(SWAPPED_CHUNK, reabasePath, fxParams);
     expect(result.status).toBe("modified");
+  });
+
+  it("flags upstream-only reorder as upstream-changes (Bug 3)", () => {
+    // Reproducer for Bug 3 propagation half: when the preset has reordered
+    // its plugins relative to a track's snapshot, but plugin params are
+    // unchanged, the track must be flagged as "upstream-changes" so the
+    // sync loop in update_and_sync_project propagates the reorder.
+    // Previously, status returned "up-to-date" because the upstream-reorder
+    // detection was gated behind hasUpstreamStateChanges.
+    const TWO_PLUGIN_CHUNK = `<TRACK {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  NAME TEST
+  PEAKCOL 17236731
+  BEAT -1
+  AUTOMODE 0
+  VOLPAN 1 0 -1 -1 1
+  MUTESOLO 0 0 0
+  ISBUS 0 0
+  NCHAN 6
+  FX 1
+  TRACKID {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+  MAINSEND 1 0
+  <FXCHAIN
+    SHOW 0
+    LASTSEL -1
+    DOCKED 0
+    BYPASS 0 0 0
+    <AU "AU: kHs Delay (Kilohearts)" "" "" 0 "" ""
+      AAAA==
+    >
+    FLOATPOS 0 0 0 0
+    FXID {07EC70AF-D570-084D-ABA9-825C6F0C365C}
+    WAK 0 0
+    BYPASS 0 0 0
+    <AU "AU: kHs Bitcrush (Kilohearts)" "" "" 0 "" ""
+      BBBB==
+    >
+    FLOATPOS 0 0 0 0
+    FXID {11111111-2222-3333-4444-555555555555}
+    WAK 0 0
+  >
+  <EXT
+    reabase_preset reorder_only
+  >
+>`;
+
+    const params = { "0": { name: "p", value: 0.5 } };
+    const fxParams = [params, params];
+
+    // Initial preset with order: Delay, Bitcrush
+    writePreset("reorder_only", [
+      { pluginName: "AU: kHs Delay (Kilohearts)", pluginType: "AU", slotId: "khs-delay", parameters: params },
+      { pluginName: "AU: kHs Bitcrush (Kilohearts)", pluginType: "AU", slotId: "khs-bitcrush", parameters: params },
+    ]);
+
+    // Snapshot the track in the original order (matches preset)
+    const snap = snapshotTrack(
+      { trackChunk: TWO_PLUGIN_CHUNK, preset: "reorder_only", fxParameters: fxParams },
+      reabasePath
+    );
+    expect(snap.success).toBe(true);
+
+    // Confirm pre-reorder baseline is up-to-date
+    const before = inspectTrack(snap.modifiedChunk, reabasePath, fxParams);
+    expect(before.status).toBe("up-to-date");
+
+    // Simulate upstream reorder: rewrite the preset with swapped order
+    // and SAME params (pure reorder, no state change).
+    writeFileSync(
+      join(reabasePath, "presets", "fx", "reorder_only.json"),
+      JSON.stringify([
+        { pluginName: "AU: kHs Bitcrush (Kilohearts)", pluginType: "AU", slotId: "khs-bitcrush", parameters: params },
+        { pluginName: "AU: kHs Delay (Kilohearts)", pluginType: "AU", slotId: "khs-delay", parameters: params },
+      ], null, 2),
+      "utf-8"
+    );
+
+    // Track B-equivalent inspect: track unchanged, preset reordered.
+    // Must be flagged as upstream-changes so the sync loop processes it.
+    const after = inspectTrack(snap.modifiedChunk, reabasePath, fxParams);
+    expect(after.status).toBe("upstream-changes");
+    expect(after.merge).not.toBeNull();
+    // Resolved chain should reflect the new preset order
+    expect(after.merge!.resolvedChain.map((fx) => fx.slotId)).toEqual([
+      "khs-bitcrush",
+      "khs-delay",
+    ]);
+
+    // Roundtrip: apply the resolved chain, re-snapshot, then re-inspect.
+    // This mirrors what update_and_sync_project does for an other-track in
+    // the structural-apply branch (apply_chunk → apply_chunk_and_parameters
+    // → bridge.snapshot). Status must return to "up-to-date" — anything
+    // else means the apply or snapshot path is corrupting state.
+    const applied = applyChunk({
+      trackChunk: snap.modifiedChunk,
+      resolvedChain: after.merge!.resolvedChain,
+    });
+    const resnap = snapshotTrack(
+      { trackChunk: applied.modifiedChunk, preset: "reorder_only", fxParameters: fxParams },
+      reabasePath
+    );
+    expect(resnap.success).toBe(true);
+    const final = inspectTrack(resnap.modifiedChunk, reabasePath, fxParams);
+    expect(final.status).toBe("up-to-date");
   });
 });
 

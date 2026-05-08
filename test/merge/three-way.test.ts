@@ -17,6 +17,30 @@ function makeFx(
   };
 }
 
+/** Build a fingerprint with real per-parameter data so per-param merge can run. */
+function makeFxWithParams(
+  name: string,
+  params: Record<string, number>,
+  options?: { type?: string; slotId?: string; stateBlob?: string }
+): FxFingerprint {
+  const type = options?.type ?? "AU";
+  const slotId =
+    options?.slotId ??
+    name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const parameters: FxFingerprint["parameters"] = {};
+  for (const [key, value] of Object.entries(params)) {
+    parameters[key] = { name: `param_${key}`, value };
+  }
+  return {
+    pluginName: `${type}: ${name}`,
+    pluginType: type,
+    stateHash: `hash_${name}_${JSON.stringify(params)}`,
+    slotId,
+    parameters,
+    stateBlob: options?.stateBlob,
+  };
+}
+
 describe("threeWayMerge", () => {
   describe("no changes", () => {
     it("returns keep_base when nothing changed", () => {
@@ -171,6 +195,65 @@ describe("threeWayMerge", () => {
       if (conflict?.type === "conflict") {
         expect(conflict.reason).toBe("Removed in base but modified locally");
       }
+    });
+
+    it("merges disjoint per-parameter edits without conflict (Bug 2)", () => {
+      // Local edits param 0 (threshold), upstream edits param 1 (ratio).
+      // Plugin-level hashes diverge; per-param merge resolves cleanly.
+      const oldBase = [
+        makeFxWithParams("Comp", { "0": 0.5, "1": 2.0 }, { stateBlob: "old_blob" }),
+      ];
+      const newBase = [
+        makeFxWithParams("Comp", { "0": 0.5, "1": 4.0 }, { stateBlob: "new_blob" }),
+      ];
+      const local = [
+        makeFxWithParams("Comp", { "0": 0.7, "1": 2.0 }, { stateBlob: "local_blob" }),
+      ];
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions).toHaveLength(1);
+      expect(result.actions[0].type).toBe("merge_params");
+      if (result.actions[0].type === "merge_params") {
+        // Merged fingerprint should carry both edits and local's blob.
+        expect(result.actions[0].fx.parameters["0"].value).toBe(0.7);
+        expect(result.actions[0].fx.parameters["1"].value).toBe(4.0);
+        expect(result.actions[0].fx.stateBlob).toBe("local_blob");
+      }
+      expect(result.resolvedChain).toHaveLength(1);
+      expect(result.resolvedChain[0].parameters["0"].value).toBe(0.7);
+      expect(result.resolvedChain[0].parameters["1"].value).toBe(4.0);
+    });
+
+    it("escalates to plugin conflict when even one param truly diverges", () => {
+      // Both sides edit the same param (0) to different values → real conflict.
+      const oldBase = [
+        makeFxWithParams("Comp", { "0": 0.5, "1": 2.0 }),
+      ];
+      const newBase = [
+        makeFxWithParams("Comp", { "0": 0.6, "1": 4.0 }),
+      ];
+      const local = [
+        makeFxWithParams("Comp", { "0": 0.7, "1": 2.0 }),
+      ];
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(true);
+      expect(result.actions[0].type).toBe("conflict");
+    });
+
+    it("treats both-sides-same-param-change as keep_local (no merge_params)", () => {
+      // Both moved param 0 to 0.7 → same change, no merge needed.
+      const oldBase = [makeFxWithParams("Comp", { "0": 0.5, "1": 2.0 })];
+      const newBase = [makeFxWithParams("Comp", { "0": 0.7, "1": 2.0 })];
+      const local = [makeFxWithParams("Comp", { "0": 0.7, "1": 2.0 })];
+
+      const result = threeWayMerge(oldBase, newBase, local);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("keep_local");
     });
 
     it("conflicts when local removed but base modified", () => {
