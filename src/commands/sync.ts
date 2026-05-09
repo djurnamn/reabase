@@ -50,7 +50,7 @@ export function planSync(reabasePath: string): SyncPlan[] {
   const snapshotsDirectory = join(reabasePath, "snapshots");
   const projectRoot = resolve(reabasePath, "..");
 
-  const presets = loadPresets(presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
   const rppFiles = findRppFiles(projectRoot);
   const plans: SyncPlan[] = [];
 
@@ -70,7 +70,7 @@ export function planSync(reabasePath: string): SyncPlan[] {
       // Resolve preset
       let resolvedPreset;
       try {
-        resolvedPreset = resolvePreset(preset, presets, presetsDirectory);
+        resolvedPreset = resolvePreset(preset, presets);
       } catch {
         continue; // Skip tracks with unresolvable presets
       }
@@ -137,7 +137,7 @@ export function executeSync(
   const snapshotsDirectory = join(reabasePath, "snapshots");
   const projectRoot = resolve(reabasePath, "..");
 
-  const presets = loadPresets(presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
   const errors: string[] = [];
 
   for (const plan of plans) {
@@ -203,11 +203,7 @@ export function executeSync(
         `${(action.trackGuid ?? "unnamed").replace(/[{}]/g, "").toLowerCase()}.json`
       );
 
-      const resolvedPreset = resolvePreset(
-        action.preset,
-        presets,
-        presetsDirectory
-      );
+      const resolvedPreset = resolvePreset(action.preset, presets);
 
       const snapshot: Snapshot = {
         version: 1,

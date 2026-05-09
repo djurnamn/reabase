@@ -9,23 +9,21 @@ import {
   getExtState,
   setExtState,
 } from "../parser/helpers.js";
-import { captureFxChain, enrichWithParameters, hashParameters } from "../snapshot/capture.js";
+import { captureFxChain, enrichWithParameters } from "../snapshot/capture.js";
 import { chainsReordered } from "../snapshot/diff.js";
 import { normalizeBlobForComparison } from "../snapshot/normalize.js";
 import { adoptSlotMapAsBaselineIfIntact } from "../snapshot/adopt.js";
-import { parsePresetFxChain, serializePresetFxChain } from "../preset/rfxchain.js";
+import { serializePresetFxChain } from "../preset/rfxchain.js";
 import { readSnapshot, writeSnapshot } from "../snapshot/store.js";
 import { loadPresets } from "../preset/loader.js";
 import { resolvePreset } from "../preset/resolver.js";
 import { threeWayMerge } from "../merge/three-way.js";
-import { updateRootPreset, updateChildPreset } from "../preset/writer.js";
+import { updatePresetOwnPlugins, updateComposition } from "../preset/writer.js";
 import { applyResolvedChainToTrack } from "./apply.js";
 import { buildSlotMap, serializeSlotMap, parseSlotMap, resolveSlotIds } from "../slot/map.js";
-import { generateSlotId } from "../slot/identity.js";
 import YAML from "yaml";
 import type { RppNode } from "../parser/types.js";
 import type { FxFingerprint, ParameterValue } from "../snapshot/types.js";
-import type { PresetDefinition } from "../preset/types.js";
 import type { MergeResult } from "../merge/types.js";
 
 // ─── inspect ─────────────────────────────────────────────────────
@@ -41,11 +39,31 @@ export interface InspectOutput {
   trackGuid: string | undefined;
   preset: string | undefined;
   currentChain: FxFingerprint[];
-  presets: { name: string; description?: string }[];
-  /** Root-first inheritance chain, e.g., ["voice_base", "player_voice"] */
-  inheritanceChain: string[];
+  presets: {
+    name: string;
+    description?: string;
+    imports?: string[];
+    /** Folder slug (relative path from presets/) and its display label.
+     *  The label falls back to the folder name when no `_category.yaml`
+     *  is present in that folder. Empty slug = preset directly under
+     *  presets/. */
+    category: { slug: string; label: string };
+  }[];
+  /** Every category the loader saw, keyed by slug. The UI uses this to
+   *  build hierarchy beyond what's reachable from the per-preset entries
+   *  above (e.g. an empty parent folder with children). */
+  categories: { slug: string; label: string }[];
+  /** Sources contributing to the resolved preset, in resolution order:
+   *  the container's own name (when it has its own plugins) followed by each
+   *  imported preset. */
+  sources: string[];
   /** Preset's ideal resolved state (with origin set), null if no preset */
   resolvedChain: FxFingerprint[] | null;
+  /** "<sourceName>/<slotId>" entries the preset has excluded from the
+   *  resolved chain. Empty array when nothing is excluded; mirrored from
+   *  the resolved preset so the UI can render excluded slots without
+   *  re-loading YAML. */
+  excluded: string[];
   status:
     | "up-to-date"
     | "modified"
@@ -75,12 +93,17 @@ export function inspectTrack(
   const presetsDirectory = join(reabasePath, "presets");
   const snapshotsDirectory = join(reabasePath, "snapshots");
 
-  const presets = loadPresets(presetsDirectory);
+  const { presets, categories } = loadPresets(presetsDirectory);
   const presetList = [...presets.values()].map((p) => ({
     name: p.name,
     description: p.description,
-    extends: p.extends,
+    imports: p.imports,
+    category: {
+      slug: p._categorySlug,
+      label: categories.get(p._categorySlug)?.label ?? p._categorySlug,
+    },
   }));
+  const categoryList = [...categories.values()];
 
   // Parse the track chunk. SWS returns the full <TRACK ...> block.
   const track = parseTrackChunk(trackChunk);
@@ -112,8 +135,10 @@ export function inspectTrack(
       preset: undefined,
       currentChain,
       presets: presetList,
-      inheritanceChain: [],
+      categories: categoryList,
+      sources: [],
       resolvedChain: null,
+      excluded: [],
       status: "no-preset",
       merge: null,
     };
@@ -122,7 +147,7 @@ export function inspectTrack(
   // Try to resolve the preset
   let resolvedPreset;
   try {
-    resolvedPreset = resolvePreset(preset, presets, presetsDirectory);
+    resolvedPreset = resolvePreset(preset, presets);
   } catch {
     return {
       trackName,
@@ -130,8 +155,10 @@ export function inspectTrack(
       preset,
       currentChain,
       presets: presetList,
-      inheritanceChain: [],
+      categories: categoryList,
+      sources: [],
       resolvedChain: null,
+      excluded: [],
       status: "unresolvable-preset",
       merge: null,
     };
@@ -205,8 +232,10 @@ export function inspectTrack(
       preset,
       currentChain,
       presets: presetList,
-      inheritanceChain: resolvedPreset.inheritanceChain,
+      categories: categoryList,
+      sources: resolvedPreset.sources,
       resolvedChain: resolvedPreset.fxChain,
+      excluded: resolvedPreset.excluded,
       status: "no-snapshot",
       merge,
     };
@@ -293,8 +322,10 @@ export function inspectTrack(
     preset,
     currentChain,
     presets: presetList,
-    inheritanceChain: resolvedPreset.inheritanceChain,
+    categories: categoryList,
+    sources: resolvedPreset.sources,
     resolvedChain: resolvedPreset.fxChain,
+    excluded: resolvedPreset.excluded,
     status,
     merge,
     debug,
@@ -398,11 +429,11 @@ export function snapshotTrack(
   }
 
   // Load preset info (needed for slot resolution and snapshot filtering)
-  const presets = loadPresets(presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
   let presetVersion = "initial";
   let resolved: ReturnType<typeof resolvePreset> | null = null;
   try {
-    resolved = resolvePreset(input.preset, presets, presetsDirectory);
+    resolved = resolvePreset(input.preset, presets);
     presetVersion = resolved.version;
   } catch {
     // If preset can't be resolved, continue with placeholder version
@@ -490,15 +521,10 @@ export function snapshotTrack(
 export interface SavePresetInput {
   trackChunk: string;
   presetName: string;
-  /** 0-based FX indices to include. If omitted, saves entire chain with raw fidelity. */
+  /** 0-based FX indices to include. If omitted, saves entire chain. */
   selectedPlugins?: number[];
-  /** Parent preset name for inheritance. Selected plugins are appended to parent's chain. */
-  extendsPreset?: string;
   /** If true, overwrite an existing preset with the same slug. Defaults to false. */
   overwrite?: boolean;
-  /** Maps 0-based plugin index to the slotId it should be inserted after.
-   *  Used by drag-and-drop on the Extend tab to control child plugin positioning. */
-  addAfter?: Record<string, string>;
   /** Parameter maps from Lua's TrackFX_GetParam, one per FX */
   fxParameters?: Record<string, ParameterValue>[];
 }
@@ -512,8 +538,9 @@ export interface SavePresetOutput {
 }
 
 /**
- * Create a new preset from a track's current FX chain.
- * Supports partial selection (selectedPlugins) and inheritance (extendsPreset).
+ * Create a new plain preset from a track's current FX chain. Composed
+ * presets (those that import other presets, declare order/excluded/etc.)
+ * are created and edited via `updateComposition`, not here.
  */
 export function savePreset(
   input: SavePresetInput,
@@ -523,7 +550,6 @@ export function savePreset(
   const fxDirectory = join(presetsDirectory, "fx");
   const track = parseTrackChunk(input.trackChunk);
 
-  // Sanitize preset name for filenames
   const safeFilename = input.presetName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -533,7 +559,6 @@ export function savePreset(
   const presetAbsPath = join(presetsDirectory, presetRelPath);
   const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
 
-  // Check for existing preset with the same slug
   if (existsSync(yamlPath) && !input.overwrite) {
     return {
       success: false,
@@ -542,7 +567,7 @@ export function savePreset(
     };
   }
 
-  // Capture fingerprints and resolve slotIds from stored slot map
+  // Capture fingerprints and resolve slotIds from the stored slot map.
   let allFingerprints = captureFxChain(track);
   if (input.fxParameters) {
     allFingerprints = enrichWithParameters(allFingerprints, input.fxParameters);
@@ -555,75 +580,37 @@ export function savePreset(
     }
   }
 
-  // Determine selected fingerprints
-  let presetContent: string | null;
-  let selectedFingerprints: FxFingerprint[];
+  const selectedFingerprints: FxFingerprint[] = input.selectedPlugins
+    ? input.selectedPlugins
+        .filter((i) => i >= 0 && i < allFingerprints.length)
+        .map((i) => allFingerprints[i])
+    : allFingerprints;
 
-  if (input.selectedPlugins) {
-    selectedFingerprints = input.selectedPlugins
-      .filter((i) => i >= 0 && i < allFingerprints.length)
-      .map((i) => allFingerprints[i]);
-
-    presetContent = selectedFingerprints.length > 0
-      ? serializePresetFxChain(selectedFingerprints)
-      : null;
-  } else {
-    selectedFingerprints = allFingerprints;
-    presetContent = selectedFingerprints.length > 0
-      ? serializePresetFxChain(selectedFingerprints)
-      : null;
-  }
-
-  // When extending with no additions, we don't need a preset file
-  if (!presetContent && !input.extendsPreset) {
+  if (selectedFingerprints.length === 0) {
     throw new Error("Track has no FX chain to save as a preset");
   }
 
-  // Ensure fx/ subdirectory exists
   mkdirSync(fxDirectory, { recursive: true });
 
-  // Build YAML preset definition
   const presetDefinition: Record<string, unknown> = {
     name: input.presetName,
-  };
-
-  if (input.extendsPreset) {
-    presetDefinition.extends = input.extendsPreset;
-  }
-
-  if (presetContent) {
-    presetDefinition.fxChainFile = presetRelPath;
-    writeFileSync(presetAbsPath, presetContent, "utf-8");
-  }
-
-  // Write plugins list with slot IDs (root presets only)
-  if (!input.extendsPreset && selectedFingerprints.length > 0) {
-    presetDefinition.plugins = selectedFingerprints.map((fp) => ({ id: fp.slotId }));
-  }
-
-  // Write add entries for child presets (proper slotIds, positioning, and origin)
-  if (input.extendsPreset && selectedFingerprints.length > 0) {
-    presetDefinition.add = selectedFingerprints.map((fp) => {
-      const entry: { id: string; after?: string } = { id: fp.slotId };
-      const trackIndex = allFingerprints.findIndex((f) => f.slotId === fp.slotId);
-
-      if (input.addAfter && String(trackIndex) in input.addAfter) {
-        // Use drag-and-drop positioning from the UI
-        entry.after = input.addAfter[String(trackIndex)];
-      } else if (trackIndex > 0) {
-        // Default: position relative to the previous plugin in the track chain
-        entry.after = allFingerprints[trackIndex - 1].slotId;
+    fxChainFile: presetRelPath,
+    plugins: selectedFingerprints.map((fp) => {
+      const entry: { id: string; label?: string } = { id: fp.slotId };
+      if (fp.displayName && fp.displayName.length > 0) {
+        entry.label = fp.displayName;
       }
       return entry;
-    });
-  }
+    }),
+  };
 
+  writeFileSync(presetAbsPath, serializePresetFxChain(selectedFingerprints), "utf-8");
   writeFileSync(yamlPath, YAML.stringify(presetDefinition), "utf-8");
 
   return {
     success: true,
     presetName: input.presetName,
-    fxChainFile: presetContent ? presetRelPath : undefined,
+    fxChainFile: presetRelPath,
   };
 }
 
@@ -636,13 +623,17 @@ export interface DeletePresetInput {
 export interface DeletePresetOutput {
   success: boolean;
   deleted: boolean;
-  /** Names of all presets deleted (includes cascaded children) */
-  deletedPresets?: string[];
+  /** When refusal is due to importers, this lists their preset names so the
+   *  UI can show a clear error. Only set when success === false. */
+  importedBy?: string[];
 }
 
 /**
- * Delete a preset by name. Cascades to all child presets that extend it
- * (directly or transitively). Removes YAML files and associated data files.
+ * Delete a preset by name. Refuses if any other preset imports it — the
+ * caller (UI or CLI) must remove or update those importers first. This is
+ * intentionally non-cascading: composition's import edges are user
+ * decisions, not parent/child relationships, and silent cascade would be
+ * surprising.
  */
 export function deletePreset(
   input: DeletePresetInput,
@@ -650,81 +641,37 @@ export function deletePreset(
 ): DeletePresetOutput {
   const presetsDirectory = join(reabasePath, "presets");
 
-  const presets = loadPresets(presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
   const preset = presets.get(input.presetName);
   if (!preset) {
     return { success: false, deleted: false };
   }
 
-  // Collect all presets to delete: the target + all descendants
-  const toDelete = collectDescendants(input.presetName, presets);
-  const deletedPresets: string[] = [];
-
-  for (const name of toDelete) {
-    const def = presets.get(name);
-    if (!def) continue;
-
-    const safeFilename = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_|_$/g, "");
-    const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
-
-    // Delete the preset data file if it exists
-    if (def.fxChainFile) {
-      const dataPath = join(presetsDirectory, def.fxChainFile);
-      if (existsSync(dataPath)) {
-        unlinkSync(dataPath);
-      }
-    }
-
-    // Delete override state files
-    if (def.override) {
-      for (const entry of Object.values(def.override)) {
-        const statePath = join(presetsDirectory, entry.stateFile);
-        if (existsSync(statePath)) {
-          unlinkSync(statePath);
-        }
-      }
-    }
-
-    // Delete the YAML file
-    if (existsSync(yamlPath)) {
-      unlinkSync(yamlPath);
-      deletedPresets.push(name);
+  const importers: string[] = [];
+  for (const [otherName, otherDef] of presets) {
+    if (otherName === input.presetName) continue;
+    if (otherDef.imports?.includes(input.presetName)) {
+      importers.push(otherName);
     }
   }
-
-  return { success: true, deleted: true, deletedPresets };
-}
-
-/**
- * Collect a preset and all its descendants (children, grandchildren, etc.)
- * in dependency order (children before parents).
- */
-function collectDescendants(
-  name: string,
-  presets: Map<string, PresetDefinition>
-): string[] {
-  const result: string[] = [];
-  const visited = new Set<string>();
-
-  function visit(current: string): void {
-    if (visited.has(current)) return;
-    visited.add(current);
-
-    // Find all direct children
-    for (const [childName, childDef] of presets) {
-      if (childDef.extends === current) {
-        visit(childName);
-      }
-    }
-
-    result.push(current);
+  if (importers.length > 0) {
+    return { success: false, deleted: false, importedBy: importers };
   }
 
-  visit(name);
-  return result;
+  const safeFilename = input.presetName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "");
+  const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
+
+  if (preset.fxChainFile) {
+    const dataPath = join(presetsDirectory, preset.fxChainFile);
+    if (existsSync(dataPath)) unlinkSync(dataPath);
+  }
+
+  if (existsSync(yamlPath)) unlinkSync(yamlPath);
+
+  return { success: true, deleted: true };
 }
 
 // ─── update-presets ───────────────────────────────────────────────
@@ -746,8 +693,14 @@ export interface UpdatePresetsOutput {
 }
 
 /**
- * Update preset files based on the track's current state and ownership assignments.
- * Writes new state files, overrides, and rfxchains as needed.
+ * Push the track's current plugin state back into the preset files. For
+ * each entry in `ownership`, the named source preset's own plugins
+ * (`plugins` + `fxChainFile`) are rewritten from the matching slotIds on
+ * the track. Composition fields (imports, order, deactivated, excluded)
+ * are preserved verbatim — those are managed via `updateComposition`.
+ *
+ * Each source — whether the composed container or any of its imports —
+ * is just a plain preset on disk, so they're handled identically here.
  */
 export function updatePresets(
   input: UpdatePresetsInput,
@@ -761,7 +714,6 @@ export function updatePresets(
     currentChain = enrichWithParameters(currentChain, input.fxParameters);
   }
 
-  // Resolve slotIds from stored slot map
   const slotMapJson = getExtState(track, "reabase_slot_map");
   if (slotMapJson) {
     const slotMap = parseSlotMap(slotMapJson);
@@ -770,53 +722,29 @@ export function updatePresets(
     }
   }
 
-  // Load and resolve preset
   const presetName = getExtState(track, "reabase_preset");
   if (!presetName) {
     throw new Error("Track has no preset assigned");
   }
 
-  const presets = loadPresets(presetsDirectory);
-  const resolvedPreset = resolvePreset(presetName, presets, presetsDirectory);
-  const inheritanceChain = resolvedPreset.inheritanceChain;
+  const { presets } = loadPresets(presetsDirectory);
+  const resolvedPreset = resolvePreset(presetName, presets);
+  const sources = resolvedPreset.sources;
 
   const updatedPresets: string[] = [];
 
-  // Process each preset in the inheritance chain that has ownership entries
-  for (let i = 0; i < inheritanceChain.length; i++) {
-    const presetNameInChain = inheritanceChain[i];
-    const ownedSlotIds = input.ownership[presetNameInChain];
+  for (const sourceName of sources) {
+    const ownedSlotIds = input.ownership[sourceName];
     if (!ownedSlotIds || ownedSlotIds.length === 0) continue;
 
-    const definition = presets.get(presetNameInChain);
+    const definition = presets.get(sourceName);
     if (!definition) continue;
 
-    const isRoot = i === 0;
-    if (isRoot) {
-      // Root preset: just collect the owned plugins in chain order.
-      const ownedFingerprints = currentChain.filter((fx) =>
-        ownedSlotIds.includes(fx.slotId)
-      );
-      updateRootPreset(presetsDirectory, definition, ownedFingerprints);
-    } else {
-      // Child preset: pass the full chain so the writer can pick correct
-      // before/after anchors relative to parent slots.
-      const parentPresetName = inheritanceChain[i - 1];
-      const parentResolved = resolvePreset(
-        parentPresetName,
-        presets,
-        presetsDirectory
-      );
-      updateChildPreset(
-        presetsDirectory,
-        definition,
-        parentResolved.fxChain,
-        currentChain,
-        ownedSlotIds
-      );
-    }
-
-    updatedPresets.push(presetNameInChain);
+    const ownedFingerprints = currentChain.filter((fx) =>
+      ownedSlotIds.includes(fx.slotId)
+    );
+    updatePresetOwnPlugins(definition, ownedFingerprints);
+    updatedPresets.push(sourceName);
   }
 
   // Re-snapshot the track
@@ -825,11 +753,11 @@ export function updatePresets(
   const trackGuid = rawTrackGuid ?? "unknown";
 
   // Reload presets after writing to get fresh version hash and filter snapshot
-  const freshPresets = loadPresets(presetsDirectory);
+  const { presets: freshPresets } = loadPresets(presetsDirectory);
   let presetVersion = "initial";
   let snapshotChain = currentChain;
   try {
-    const freshResolved = resolvePreset(presetName, freshPresets, presetsDirectory);
+    const freshResolved = resolvePreset(presetName, freshPresets);
     presetVersion = freshResolved.version;
     // Filter snapshot to only include plugins in the resolved chain.
     // Released plugins are excluded so they appear as local additions.
@@ -917,8 +845,8 @@ export function revertPlugin(
     throw new Error("Track has no preset assigned");
   }
 
-  const presets = loadPresets(presetsDirectory);
-  const resolvedPreset = resolvePreset(preset, presets, presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
+  const resolvedPreset = resolvePreset(preset, presets);
 
   // Find the fingerprint for this slotId in the resolved chain
   const presetFingerprint = resolvedPreset.fxChain.find(
@@ -940,296 +868,102 @@ export function revertPlugin(
   };
 }
 
-// ─── unlink-override ──────────────────────────────────────────────
+// ─── rename-slot ─────────────────────────────────────────────────
 
-export interface UnlinkOverrideInput {
+export interface RenameSlotInput {
   trackChunk: string;
   slotId: string;
-  fxParameters?: Record<string, ParameterValue>[];
+  /** New label. Empty string clears the existing label. */
+  label: string;
 }
 
-export interface UnlinkOverrideOutput {
+export interface RenameSlotOutput {
   success: boolean;
-  newSlotId: string;
   modifiedChunk: string;
 }
 
 /**
- * Convert a child preset's override into a separate addition ("unlink").
- * The parent's original plugin is restored at the original slotId,
- * and the child's version becomes a new addition with a unique slotId.
+ * Set or clear a slot's track-local label. The label round-trips through
+ * the track's slot map (P_EXT `reabase_slot_map`) and surfaces as
+ * `fp.displayName` on next capture.
+ *
+ * Track-local labels are independent of preset-provided labels — the UI
+ * resolution order is: track-local label > preset label > pluginName.
+ * Useful for labelling local additions that aren't part of any preset, or
+ * giving the same plugin a track-specific name.
  */
-export function unlinkOverride(
-  input: UnlinkOverrideInput,
-  reabasePath: string
-): UnlinkOverrideOutput {
-  const presetsDirectory = join(reabasePath, "presets");
+export function renameSlot(input: RenameSlotInput): RenameSlotOutput {
   const track = parseTrackChunk(input.trackChunk);
-
-  const presetName = getExtState(track, "reabase_preset");
-  if (!presetName) {
-    throw new Error("Track has no preset assigned");
-  }
-
-  const presets = loadPresets(presetsDirectory);
-  const resolvedPreset = resolvePreset(presetName, presets, presetsDirectory);
-
-  // Find the plugin in the resolved chain for structural info
-  const resolvedFx = resolvedPreset.fxChain.find((fx) => fx.slotId === input.slotId);
-  if (!resolvedFx) {
-    throw new Error(`Plugin with slotId '${input.slotId}' not found in resolved preset`);
-  }
-
-  // Find which child preset overrides this slotId
-  const { definition: childDef, index: childIndex } = findChildPresetForSlot(
-    input.slotId, resolvedPreset.inheritanceChain, presets, "override"
-  );
-
-  // Get the override's parameters (from the state file or current track)
-  let overrideParams: Record<string, ParameterValue> = resolvedFx.parameters;
-  if (childDef.override?.[input.slotId]?.stateFile) {
-    const stateFilePath = resolve(presetsDirectory, childDef.override[input.slotId].stateFile);
-    if (existsSync(stateFilePath)) {
-      overrideParams = JSON.parse(readFileSync(stateFilePath, "utf-8"));
-    }
-  }
-
-  // Generate a new unique slotId
-  const existingIds = new Set(resolvedPreset.fxChain.map((fx) => fx.slotId));
-  const newSlotId = generateSlotId(resolvedFx.pluginName, existingIds);
-
-  // Determine insertion position (after the overridden slot)
-  const resolvedIndex = resolvedPreset.fxChain.findIndex((fx) => fx.slotId === input.slotId);
-  const afterSlotId = input.slotId; // Insert after the parent's slot
-
-  // Rewrite the child preset YAML
-  const safeFilename = childDef.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_|_$/g, "");
-  const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
-
-  // Remove the override entry
-  const newOverride = { ...childDef.override };
-  delete newOverride[input.slotId];
-
-  // Build the new plugin entry for the additions file
-  const newPlugin: FxFingerprint = {
-    pluginName: resolvedFx.pluginName,
-    pluginType: resolvedFx.pluginType,
-    pluginParams: resolvedFx.pluginParams,
-    slotId: newSlotId,
-    parameters: overrideParams,
-    stateHash: hashParameters(overrideParams),
-  };
-
-  // Read or create the child's fxChainFile
-  const fxDirectory = join(presetsDirectory, "fx");
-  mkdirSync(fxDirectory, { recursive: true });
-  const presetRelPath = childDef.fxChainFile ?? `fx/${safeFilename}.json`;
-  const presetAbsPath = resolve(presetsDirectory, presetRelPath);
-
-  let existingPlugins: FxFingerprint[] = [];
-  if (childDef.fxChainFile && existsSync(presetAbsPath)) {
-    existingPlugins = parsePresetFxChain(readFileSync(presetAbsPath, "utf-8"));
-  }
-  existingPlugins.push(newPlugin);
-  writeFileSync(presetAbsPath, serializePresetFxChain(existingPlugins), "utf-8");
-
-  // Build new add entries
-  const existingAdd = childDef.add ?? [];
-  const newAdd = [...existingAdd, { id: newSlotId, after: afterSlotId }];
-
-  // Write updated YAML
-  const yamlDefinition: Record<string, unknown> = {
-    name: childDef.name,
-  };
-  if (childDef.description) yamlDefinition.description = childDef.description;
-  if (childDef.extends) yamlDefinition.extends = childDef.extends;
-  if (Object.keys(newOverride).length > 0) yamlDefinition.override = newOverride;
-  if (childDef.remove && childDef.remove.length > 0) yamlDefinition.remove = childDef.remove;
-  yamlDefinition.fxChainFile = presetRelPath;
-  yamlDefinition.add = newAdd;
-  writeFileSync(yamlPath, YAML.stringify(yamlDefinition), "utf-8");
-
-  // Clean up the old override state file
-  if (childDef.override?.[input.slotId]?.stateFile) {
-    const oldStatePath = resolve(presetsDirectory, childDef.override[input.slotId].stateFile);
-    if (existsSync(oldStatePath)) {
-      unlinkSync(oldStatePath);
-    }
-  }
-
-  // Update the track's slot map: rename slotId -> newSlotId
   const slotMapJson = getExtState(track, "reabase_slot_map");
-  if (slotMapJson) {
-    const slotMap = parseSlotMap(slotMapJson);
-    if (slotMap && slotMap[input.slotId]) {
-      slotMap[newSlotId] = { ...slotMap[input.slotId] };
-      delete slotMap[input.slotId];
-      setExtState(track, "reabase_slot_map", serializeSlotMap(slotMap));
-    }
-  }
-
-  const modifiedChunk = serializeTrackChunk(track, input.trackChunk);
-  return { success: true, newSlotId, modifiedChunk };
-}
-
-// ─── link-as-override ────────────────────────────────────────────
-
-export interface LinkAsOverrideInput {
-  trackChunk: string;
-  childSlotId: string;
-  parentSlotId: string;
-  fxParameters?: Record<string, ParameterValue>[];
-}
-
-export interface LinkAsOverrideOutput {
-  success: boolean;
-  modifiedChunk: string;
-  parameterMaps: Record<string, ParameterValue>[];
-}
-
-/**
- * Convert a child preset's addition into an override of a parent slot ("link").
- * The child plugin stops being a separate instance and instead overrides
- * the parent's plugin at parentSlotId with the child's parameters.
- */
-export function linkAsOverride(
-  input: LinkAsOverrideInput,
-  reabasePath: string
-): LinkAsOverrideOutput {
-  const presetsDirectory = join(reabasePath, "presets");
-  const track = parseTrackChunk(input.trackChunk);
-
-  const presetName = getExtState(track, "reabase_preset");
-  if (!presetName) {
-    throw new Error("Track has no preset assigned");
-  }
-
-  const presets = loadPresets(presetsDirectory);
-  const resolvedPreset = resolvePreset(presetName, presets, presetsDirectory);
-
-  // Find both plugins in the resolved chain
-  const childFx = resolvedPreset.fxChain.find((fx) => fx.slotId === input.childSlotId);
-  const parentFx = resolvedPreset.fxChain.find((fx) => fx.slotId === input.parentSlotId);
-
-  if (!childFx) {
-    throw new Error(`Child plugin '${input.childSlotId}' not found in resolved preset`);
-  }
-  if (!parentFx) {
-    throw new Error(`Parent plugin '${input.parentSlotId}' not found in resolved preset`);
-  }
-
-  // Verify same plugin type
-  if (childFx.pluginType !== parentFx.pluginType || childFx.pluginName !== parentFx.pluginName) {
+  if (!slotMapJson) {
     throw new Error(
-      `Cannot override: plugin types differ (${childFx.pluginName} vs ${parentFx.pluginName})`
+      `Track has no slot map yet — apply or snapshot the preset first to establish slot identities`
+    );
+  }
+  const slotMap = parseSlotMap(slotMapJson);
+  if (!slotMap) {
+    throw new Error(`Track's slot map is malformed; cannot rename slot`);
+  }
+  const entry = slotMap[input.slotId];
+  if (!entry) {
+    throw new Error(
+      `Slot '${input.slotId}' not found in this track's slot map`
     );
   }
 
-  // Find which child preset owns the addition
-  const { definition: childDef } = findChildPresetForSlot(
-    input.childSlotId, resolvedPreset.inheritanceChain, presets, "add"
-  );
-
-  const safeFilename = childDef.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_|_$/g, "");
-  const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
-  const fxDirectory = join(presetsDirectory, "fx");
-  mkdirSync(fxDirectory, { recursive: true });
-
-  // Get the child plugin's parameters
-  const childParams = childFx.parameters;
-
-  // Write the override state file
-  const stateFileName = `fx/${childDef.name}_${input.parentSlotId}.json`;
-  const stateFilePath = resolve(presetsDirectory, stateFileName);
-  writeFileSync(stateFilePath, JSON.stringify(childParams, null, 2), "utf-8");
-
-  // Remove the child from the add list
-  const newAdd = (childDef.add ?? []).filter((a) => a.id !== input.childSlotId);
-
-  // Remove the child from the fxChainFile
-  if (childDef.fxChainFile) {
-    const presetAbsPath = resolve(presetsDirectory, childDef.fxChainFile);
-    if (existsSync(presetAbsPath)) {
-      const plugins = parsePresetFxChain(readFileSync(presetAbsPath, "utf-8"));
-      const filtered = plugins.filter((p) => p.slotId !== input.childSlotId);
-      if (filtered.length > 0) {
-        writeFileSync(presetAbsPath, serializePresetFxChain(filtered), "utf-8");
-      } else {
-        unlinkSync(presetAbsPath);
-      }
-    }
+  if (input.label.length === 0) {
+    delete entry.label;
+  } else {
+    entry.label = input.label;
   }
+  slotMap[input.slotId] = entry;
 
-  // Build new override map
-  const newOverride = { ...(childDef.override ?? {}) };
-  newOverride[input.parentSlotId] = { stateFile: stateFileName };
-
-  // Write updated YAML
-  const yamlDefinition: Record<string, unknown> = {
-    name: childDef.name,
-  };
-  if (childDef.description) yamlDefinition.description = childDef.description;
-  if (childDef.extends) yamlDefinition.extends = childDef.extends;
-  yamlDefinition.override = newOverride;
-  if (childDef.remove && childDef.remove.length > 0) yamlDefinition.remove = childDef.remove;
-  if (newAdd.length > 0) {
-    yamlDefinition.fxChainFile = childDef.fxChainFile;
-    yamlDefinition.add = newAdd;
-  }
-  // If no more additions, don't include fxChainFile/add
-  writeFileSync(yamlPath, YAML.stringify(yamlDefinition), "utf-8");
-
-  // Re-resolve the preset to get the new chain (with override applied)
-  const freshPresets = loadPresets(presetsDirectory);
-  const freshResolved = resolvePreset(presetName, freshPresets, presetsDirectory);
-
-  // Rebuild the track's FXCHAIN with the new resolved chain
-  applyResolvedChainToTrack(track, freshResolved.fxChain);
-
-  // Update slot map
-  const slotMap = buildSlotMap(freshResolved.fxChain);
   setExtState(track, "reabase_slot_map", serializeSlotMap(slotMap));
-
-  const parameterMaps = freshResolved.fxChain.map((fx) => fx.parameters);
   const modifiedChunk = serializeTrackChunk(track, input.trackChunk);
-
-  return { success: true, modifiedChunk, parameterMaps };
+  return { success: true, modifiedChunk };
 }
 
-// ─── helpers: find child preset for slot ─────────────────────────
+// ─── update-composition ──────────────────────────────────────────
+
+export interface UpdateCompositionInput {
+  presetName: string;
+  /** Pass to overwrite. Omit (`undefined`) to leave the field alone. Pass
+   *  an empty array to clear it. */
+  imports?: string[];
+  order?: string[];
+  deactivated?: string[];
+  excluded?: string[];
+}
+
+export interface UpdateCompositionOutput {
+  success: boolean;
+  presetName: string;
+}
 
 /**
- * Find which child preset in the inheritance chain owns a slot
- * via either an `override` or `add` entry.
+ * Edit a composed preset's composition fields in one shot. The Lua UI
+ * typically sends the full new state of everything it manages after a
+ * reorder / exclude-toggle / etc., so this is the single command that
+ * covers all of: add/remove an import, reorder, set deactivated, set
+ * excluded.
  */
-function findChildPresetForSlot(
-  slotId: string,
-  inheritanceChain: string[],
-  presets: Map<string, PresetDefinition>,
-  mode: "override" | "add"
-): { definition: PresetDefinition; index: number } {
-  // Walk from leaf to root (children override parents)
-  for (let i = inheritanceChain.length - 1; i >= 1; i--) {
-    const def = presets.get(inheritanceChain[i]);
-    if (!def) continue;
-
-    if (mode === "override" && def.override?.[slotId]) {
-      return { definition: def, index: i };
-    }
-    if (mode === "add" && def.add?.some((a) => a.id === slotId)) {
-      return { definition: def, index: i };
-    }
+export function updateCompositionBridge(
+  input: UpdateCompositionInput,
+  reabasePath: string
+): UpdateCompositionOutput {
+  const presetsDirectory = join(reabasePath, "presets");
+  const { presets } = loadPresets(presetsDirectory);
+  const definition = presets.get(input.presetName);
+  if (!definition) {
+    throw new Error(`Preset '${input.presetName}' not found`);
   }
-
-  throw new Error(
-    `No child preset found with ${mode} for slotId '${slotId}' in inheritance chain [${inheritanceChain.join(", ")}]`
-  );
+  updateComposition(definition, {
+    imports: input.imports,
+    order: input.order,
+    deactivated: input.deactivated,
+    excluded: input.excluded,
+  });
+  return { success: true, presetName: input.presetName };
 }
 
 // ─── blob-only change promotion (Bug 4) ──────────────────────────

@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolvePreset } from "../../src/preset/resolver.js";
-import type { PresetDefinition } from "../../src/preset/types.js";
+import type { PresetDefinition, LoadedPreset } from "../../src/preset/types.js";
 import type { ParameterValue } from "../../src/snapshot/types.js";
 
 let tempDir: string;
@@ -17,586 +17,452 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-/** Write a JSON preset file with one plugin. */
-function writePresetJson(
-  filename: string,
-  pluginName: string,
-  parameters: Record<string, ParameterValue>,
-  slotId?: string
-): void {
-  const plugin = {
-    pluginName,
+interface PluginSpec {
+  pluginName: string;
+  parameters: Record<string, ParameterValue>;
+  slotId?: string;
+}
+
+function writeFxChainFile(filename: string, plugins: PluginSpec[]): void {
+  const content = plugins.map((p) => ({
+    pluginName: p.pluginName,
     pluginType: "AU",
     pluginParams: ["", "", 0, "", ""],
-    slotId: slotId ?? "auto",
-    parameters,
-  };
-  writeFileSync(join(tempDir, filename), JSON.stringify([plugin]), "utf-8");
+    slotId: p.slotId ?? "auto",
+    parameters: p.parameters,
+  }));
+  writeFileSync(join(tempDir, filename), JSON.stringify(content), "utf-8");
 }
 
-/** Write a JSON parameter override file. */
-function writeStateFile(filename: string, parameters: Record<string, ParameterValue>): void {
-  writeFileSync(join(tempDir, filename), JSON.stringify(parameters), "utf-8");
+/** Build a LoadedPreset from a YAML-shape PresetDefinition. The resolver
+ *  reads `_sourceDir` to resolve fxChainFile paths; these tests dump
+ *  fxChainFile JSONs directly under tempDir, so that's the source dir.
+ *  `_categorySlug` is empty (preset lives at the root). */
+function lp(def: PresetDefinition): LoadedPreset {
+  return { ...def, _sourceDir: tempDir, _categorySlug: "" };
 }
 
-const paramsA: Record<string, ParameterValue> = {
-  "0": { name: "threshold", value: 0.5 },
-};
+const paramsA: Record<string, ParameterValue> = { "0": { name: "x", value: 0.5 } };
+const paramsB: Record<string, ParameterValue> = { "0": { name: "x", value: 0.8 } };
+const paramsC: Record<string, ParameterValue> = { "0": { name: "x", value: 0.3 } };
 
-const paramsB: Record<string, ParameterValue> = {
-  "0": { name: "threshold", value: 0.8 },
-};
-
-const paramsC: Record<string, ParameterValue> = {
-  "0": { name: "threshold", value: 0.3 },
-};
-
-const paramsLimiter: Record<string, ParameterValue> = {
-  "0": { name: "ceiling", value: -1.0 },
-};
-
-const paramsLimiterOverride: Record<string, ParameterValue> = {
-  "0": { name: "ceiling", value: -3.0 },
-};
-
-describe("resolvePreset", () => {
-  it("resolves a simple preset with no inheritance", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-      }],
+describe("resolvePreset — plain presets", () => {
+  it("resolves a preset with own plugins and no imports", () => {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
     ]);
 
-    const resolved = resolvePreset("player_voice", presets, tempDir);
-    expect(resolved.name).toBe("player_voice");
-    expect(resolved.inheritanceChain).toEqual(["player_voice"]);
+    const presets = new Map<string, LoadedPreset>([
+      ["voice", lp({ name: "voice", fxChainFile: "fx/voice.json", plugins: [{ id: "khs-compressor" }] })],
+    ]);
+
+    const resolved = resolvePreset("voice", presets);
+    expect(resolved.name).toBe("voice");
+    expect(resolved.sources).toEqual(["voice"]);
     expect(resolved.fxChain).toHaveLength(1);
-    expect(resolved.fxChain[0].pluginName).toBe("AU: T-De-Esser 2 (Techivation)");
-    expect(resolved.version).toBeTruthy();
+    expect(resolved.fxChain[0].slotId).toBe("khs-compressor");
+    expect(resolved.fxChain[0].origin).toBe("voice");
+    expect(resolved.fxChain[0].bypassed).toBeUndefined();
+    expect(resolved.excluded).toEqual([]);
     expect(resolved.version).toHaveLength(12);
   });
 
-  it("resolves a preset with single-level inheritance and slot override", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA, "t-de-esser-2");
-    writeStateFile("fx/de-esser-male.json", paramsB);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["player_voice_male", {
-        name: "player_voice_male",
-        extends: "player_voice",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-male.json",
-          },
-        },
-      }],
+  it("auto-generates slotIds when no plugins list is provided", () => {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: T-De-Esser 2 (Techivation)", parameters: paramsA },
     ]);
 
-    const resolved = resolvePreset("player_voice_male", presets, tempDir);
-    expect(resolved.name).toBe("player_voice_male");
-    expect(resolved.inheritanceChain).toEqual(["player_voice", "player_voice_male"]);
-    expect(resolved.fxChain).toHaveLength(1);
-    // The parameters should be overridden
-    expect(resolved.fxChain[0].parameters).toEqual(paramsB);
-  });
-
-  it("produces different version hashes for different chains", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA, "t-de-esser-2");
-    writeStateFile("fx/de-esser-male.json", paramsB);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["player_voice_male", {
-        name: "player_voice_male",
-        extends: "player_voice",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-male.json",
-          },
-        },
-      }],
+    const presets = new Map<string, LoadedPreset>([
+      ["voice", lp({ name: "voice", fxChainFile: "fx/voice.json" })],
     ]);
 
-    const base = resolvePreset("player_voice", presets, tempDir);
-    const male = resolvePreset("player_voice_male", presets, tempDir);
-
-    expect(base.version).not.toBe(male.version);
-  });
-
-  it("resolves multi-level inheritance", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA, "t-de-esser-2");
-    writeStateFile("fx/de-esser-male.json", paramsB);
-    writeStateFile("fx/de-esser-deep.json", paramsC);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["voice_base", {
-        name: "voice_base",
-        fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["player_voice", {
-        name: "player_voice",
-        extends: "voice_base",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-male.json",
-          },
-        },
-      }],
-      ["player_voice_special", {
-        name: "player_voice_special",
-        extends: "player_voice",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-deep.json",
-          },
-        },
-      }],
-    ]);
-
-    const resolved = resolvePreset("player_voice_special", presets, tempDir);
-    expect(resolved.inheritanceChain).toEqual(["voice_base", "player_voice", "player_voice_special"]);
-    // Final override wins
-    expect(resolved.fxChain[0].parameters).toEqual(paramsC);
-  });
-
-  it("throws for unknown preset name", () => {
-    const presets = new Map<string, PresetDefinition>();
-    expect(() => resolvePreset("nope", presets, tempDir)).toThrow("not found");
-  });
-
-  it("preserves plugins without overrides", () => {
-    // JSON preset with two plugins
-    const plugins = [
-      {
-        pluginName: "AU: T-De-Esser 2 (Techivation)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "t-de-esser-2",
-        parameters: paramsA,
-      },
-      {
-        pluginName: "AU: kHs Limiter (Kilohearts)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "khs-limiter",
-        parameters: paramsLimiter,
-      },
-    ];
-    writeFileSync(join(tempDir, "fx/multi.json"), JSON.stringify(plugins), "utf-8");
-    writeStateFile("fx/limiter-override.json", paramsLimiterOverride);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["base", {
-        name: "base",
-        fxChainFile: "fx/multi.json",
-        plugins: [{ id: "de-esser" }, { id: "limiter" }],
-      }],
-      ["variant", {
-        name: "variant",
-        extends: "base",
-        override: {
-          "limiter": {
-            stateFile: "fx/limiter-override.json",
-          },
-        },
-      }],
-    ]);
-
-    const resolved = resolvePreset("variant", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(2);
-    // De-Esser should be unchanged
-    expect(resolved.fxChain[0].parameters).toEqual(paramsA);
-    // Limiter should be overridden
-    expect(resolved.fxChain[1].parameters).toEqual(paramsLimiterOverride);
-  });
-
-  it("appends child fxChainFile plugins after parent chain", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_additions.json", "AU: kHs Limiter (Kilohearts)", paramsLimiter);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_additions.json",
-      }],
-    ]);
-
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(2);
-    expect(resolved.fxChain[0].pluginName).toBe("AU: T-De-Esser 2 (Techivation)");
-    expect(resolved.fxChain[1].pluginName).toBe("AU: kHs Limiter (Kilohearts)");
-  });
-
-  it("resolves child with extends but no fxChainFile (pure inheritance)", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-      }],
-    ]);
-
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(1);
-    expect(resolved.fxChain[0].pluginName).toBe("AU: T-De-Esser 2 (Techivation)");
-  });
-
-  it("assigns slotIds from root plugins list", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-    ]);
-
-    const resolved = resolvePreset("player_voice", presets, tempDir);
-    expect(resolved.fxChain[0].slotId).toBe("de-esser");
-  });
-
-  it("auto-generates slotIds when no plugins list", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-      }],
-    ]);
-
-    const resolved = resolvePreset("player_voice", presets, tempDir);
+    const resolved = resolvePreset("voice", presets);
     expect(resolved.fxChain[0].slotId).toBe("t-de-esser-2");
   });
 
-  it("applies slot-based override by slotId", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writeStateFile("fx/de-esser-male.json", paramsB);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
-        fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["player_voice_male", {
-        name: "player_voice_male",
-        extends: "player_voice",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-male.json",
-          },
-        },
-      }],
+  it("propagates plugin labels onto FxFingerprint.displayName", () => {
+    writeFxChainFile("fx/filters.json", [
+      { pluginName: "AU: kHs Filter (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: kHs Filter (Kilohearts)", parameters: paramsB },
     ]);
 
-    const resolved = resolvePreset("player_voice_male", presets, tempDir);
-    expect(resolved.fxChain[0].parameters).toEqual(paramsB);
-    expect(resolved.fxChain[0].slotId).toBe("de-esser");
-  });
-
-  it("removes slots by slotId", () => {
-    const plugins = [
-      {
-        pluginName: "AU: T-De-Esser 2 (Techivation)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "t-de-esser-2",
-        parameters: paramsA,
-      },
-      {
-        pluginName: "AU: kHs Limiter (Kilohearts)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "khs-limiter",
-        parameters: paramsLimiter,
-      },
-    ];
-    writeFileSync(join(tempDir, "fx/multi.json"), JSON.stringify(plugins), "utf-8");
-
-    const presets = new Map<string, PresetDefinition>([
-      ["base", {
-        name: "base",
-        fxChainFile: "fx/multi.json",
-        plugins: [{ id: "de-esser" }, { id: "limiter" }],
-      }],
-      ["variant", {
-        name: "variant",
-        extends: "base",
-        remove: ["limiter"],
-      }],
-    ]);
-
-    const resolved = resolvePreset("variant", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(1);
-    expect(resolved.fxChain[0].slotId).toBe("de-esser");
-  });
-
-  it("adds slots with insertion point", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_add.json", "AU: kHs Limiter (Kilohearts)", paramsLimiter);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [{ id: "limiter", after: "de-esser" }],
-      }],
-    ]);
-
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(2);
-    expect(resolved.fxChain[0].slotId).toBe("de-esser");
-    expect(resolved.fxChain[1].slotId).toBe("limiter");
-    expect(resolved.fxChain[1].pluginName).toBe("AU: kHs Limiter (Kilohearts)");
-  });
-
-  it("places an added slot before a named anchor with `before:`", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_add.json", "AU: kHs Filter (Kilohearts)", paramsB);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [{ id: "filter", before: "de-esser" }],
-      }],
-    ]);
-
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(2);
-    expect(resolved.fxChain[0].slotId).toBe("filter");
-    expect(resolved.fxChain[1].slotId).toBe("de-esser");
-  });
-
-  it("supports `before:` referencing a sibling addition emitted earlier in the same level", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    const childPlugins = [
-      {
-        pluginName: "AU: kHs Filter (Kilohearts)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "auto1",
-        parameters: paramsB,
-      },
-      {
-        pluginName: "AU: kHs Compressor (Kilohearts)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "auto2",
-        parameters: paramsLimiter,
-      },
-    ];
-    writeFileSync(join(tempDir, "fx/child_add.json"), JSON.stringify(childPlugins), "utf-8");
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [
-          { id: "filter", before: "de-esser" },
-          { id: "compressor", before: "filter" },
+    const presets = new Map<string, LoadedPreset>([
+      ["filters", lp({
+        name: "filters",
+        fxChainFile: "fx/filters.json",
+        plugins: [
+          { id: "khs-filter", label: "Aggressive low-cut" },
+          { id: "khs-filter-2", label: "High shelf boost" },
         ],
-      }],
+      })],
     ]);
 
-    const resolved = resolvePreset("child", presets, tempDir);
+    const resolved = resolvePreset("filters", presets);
+    expect(resolved.fxChain[0].displayName).toBe("Aggressive low-cut");
+    expect(resolved.fxChain[1].displayName).toBe("High shelf boost");
+  });
+
+  it("leaves displayName undefined when no label is set", () => {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["voice", lp({ name: "voice", fxChainFile: "fx/voice.json", plugins: [{ id: "c" }] })],
+    ]);
+
+    const resolved = resolvePreset("voice", presets);
+    expect(resolved.fxChain[0].displayName).toBeUndefined();
+  });
+
+  it("throws for an unknown preset name", () => {
+    const presets = new Map<string, LoadedPreset>();
+    expect(() => resolvePreset("nope", presets)).toThrow(/not found/);
+  });
+
+  it("treats an empty preset (no plugins, no imports) as an empty chain", () => {
+    const presets = new Map<string, LoadedPreset>([
+      ["empty", lp({ name: "empty" })],
+    ]);
+    const resolved = resolvePreset("empty", presets);
+    expect(resolved.sources).toEqual([]);
+    expect(resolved.fxChain).toEqual([]);
+    expect(resolved.excluded).toEqual([]);
+  });
+});
+
+describe("resolvePreset — composition", () => {
+  function setupBasicMixins(): Map<string, LoadedPreset> {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    writeFxChainFile("fx/role.character.json", [
+      { pluginName: "AU: kHs Filter 1 (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: TOTape9 (Kilohearts)", parameters: paramsB },
+    ]);
+    writeFxChainFile("fx/gender.female.json", [
+      { pluginName: "AU: kHs Filter Lowcut (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: T-De-Esser 2 (Techivation)", parameters: paramsB },
+    ]);
+
+    return new Map<string, LoadedPreset>([
+      ["voice", lp({
+        name: "voice",
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "khs-compressor" }],
+      })],
+      ["role.character", lp({
+        name: "role.character",
+        fxChainFile: "fx/role.character.json",
+        plugins: [{ id: "khs-filter-1" }, { id: "totape9" }],
+      })],
+      ["gender.female", lp({
+        name: "gender.female",
+        fxChainFile: "fx/gender.female.json",
+        plugins: [{ id: "khs-filter-lowcut" }, { id: "t-de-esser-2" }],
+      })],
+    ]);
+  }
+
+  it("uses default order when `order` is absent (sources concatenated, container first)", () => {
+    const presets = setupBasicMixins();
+    presets.set("voice.character.female", lp({
+      name: "voice.character.female",
+      imports: ["voice", "role.character", "gender.female"],
+    }));
+
+    const resolved = resolvePreset("voice.character.female", presets);
+    expect(resolved.sources).toEqual(["voice", "role.character", "gender.female"]);
     expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
-      "compressor",
-      "filter",
-      "de-esser",
+      "khs-compressor",
+      "khs-filter-1",
+      "totape9",
+      "khs-filter-lowcut",
+      "t-de-esser-2",
     ]);
   });
 
-  it("falls back to appending when `before:` anchor is not in the chain", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_add.json", "AU: kHs Filter (Kilohearts)", paramsB);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [{ id: "filter", before: "non-existent-slot" }],
-      }],
+  it("places container's own plugins first in default order", () => {
+    const presets = setupBasicMixins();
+    writeFxChainFile("fx/own.json", [
+      { pluginName: "AU: kHs Tilt (Kilohearts)", parameters: paramsC },
     ]);
+    presets.set("voice.character.female", lp({
+      name: "voice.character.female",
+      imports: ["voice", "role.character"],
+      fxChainFile: "fx/own.json",
+      plugins: [{ id: "khs-tilt" }],
+    }));
 
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["de-esser", "filter"]);
+    const resolved = resolvePreset("voice.character.female", presets);
+    expect(resolved.sources).toEqual(["voice.character.female", "voice", "role.character"]);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-tilt",
+      "khs-compressor",
+      "khs-filter-1",
+      "totape9",
+    ]);
   });
 
-  it("sets origin to root preset for root plugins", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
+  it("respects an explicit `order` field", () => {
+    const presets = setupBasicMixins();
+    presets.set("voice.character.female", lp({
+      name: "voice.character.female",
+      imports: ["voice", "role.character", "gender.female"],
+      order: [
+        "voice/khs-compressor",
+        "gender.female/khs-filter-lowcut",
+        "role.character/khs-filter-1",
+        "role.character/totape9",
+        "gender.female/t-de-esser-2",
+      ],
+    }));
 
-    const presets = new Map<string, PresetDefinition>([
-      ["player_voice", {
-        name: "player_voice",
+    const resolved = resolvePreset("voice.character.female", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-compressor",
+      "khs-filter-lowcut",
+      "khs-filter-1",
+      "totape9",
+      "t-de-esser-2",
+    ]);
+    expect(resolved.fxChain.map((fx) => fx.origin)).toEqual([
+      "voice",
+      "gender.female",
+      "role.character",
+      "role.character",
+      "gender.female",
+    ]);
+  });
+
+  it("appends drift slots at the end when `order` does not mention them", () => {
+    const presets = setupBasicMixins();
+    presets.set("voice.female", lp({
+      name: "voice.female",
+      imports: ["voice", "gender.female"],
+      order: ["voice/khs-compressor"],
+    }));
+
+    const resolved = resolvePreset("voice.female", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-compressor",
+      "khs-filter-lowcut",
+      "t-de-esser-2",
+    ]);
+  });
+
+  it("throws on an order entry referencing an unknown source", () => {
+    const presets = setupBasicMixins();
+    presets.set("composed", lp({
+      name: "composed",
+      imports: ["voice"],
+      order: ["typo/khs-compressor"],
+    }));
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /unknown source 'typo'/
+    );
+  });
+
+  it("throws on an order entry referencing an unknown slot in a known source", () => {
+    const presets = setupBasicMixins();
+    presets.set("composed", lp({
+      name: "composed",
+      imports: ["voice"],
+      order: ["voice/missing-slot"],
+    }));
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /references slot 'missing-slot'/
+    );
+  });
+});
+
+describe("resolvePreset — same-slot-ID across sources is rejected", () => {
+  it("throws when two imports define the same slotId", () => {
+    writeFxChainFile("fx/a.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    writeFxChainFile("fx/b.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsB },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["voice", lp({ name: "voice", fxChainFile: "fx/a.json", plugins: [{ id: "khs-compressor" }] })],
+      ["alt", lp({ name: "alt", fxChainFile: "fx/b.json", plugins: [{ id: "khs-compressor" }] })],
+      ["composed", lp({ name: "composed", imports: ["voice", "alt"] })],
+    ]);
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /slot 'khs-compressor' is defined in both 'voice' and 'alt'/
+    );
+  });
+
+  it("throws when the container and an import define the same slotId", () => {
+    writeFxChainFile("fx/imported.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    writeFxChainFile("fx/container.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsB },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["mixin", lp({
+        name: "mixin",
+        fxChainFile: "fx/imported.json",
+        plugins: [{ id: "khs-compressor" }],
+      })],
+      ["composed", lp({
+        name: "composed",
+        imports: ["mixin"],
+        fxChainFile: "fx/container.json",
+        plugins: [{ id: "khs-compressor" }],
+      })],
+    ]);
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /slot 'khs-compressor' is defined in both/
+    );
+  });
+});
+
+describe("resolvePreset — excluded", () => {
+  function setupTwoSlotComposed(extras: Partial<PresetDefinition> = {}): Map<string, LoadedPreset> {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: kHs Limiter (Kilohearts)", parameters: paramsB },
+    ]);
+    return new Map<string, LoadedPreset>([
+      ["voice", lp({
+        name: "voice",
         fxChainFile: "fx/voice.json",
-      }],
+        plugins: [{ id: "khs-compressor" }, { id: "khs-limiter" }],
+      })],
+      ["composed", lp({
+        name: "composed",
+        imports: ["voice"],
+        ...extras,
+      })],
     ]);
+  }
 
-    const resolved = resolvePreset("player_voice", presets, tempDir);
-    expect(resolved.fxChain[0].origin).toBe("player_voice");
+  it("filters excluded slots out of the resolved chain", () => {
+    const presets = setupTwoSlotComposed({ excluded: ["voice/khs-limiter"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["khs-compressor"]);
+    expect(resolved.excluded).toEqual(["voice/khs-limiter"]);
   });
 
-  it("sets origin to overriding preset for overridden plugins", () => {
-    writePresetJson("fx/voice.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writeStateFile("fx/de-esser-male.json", paramsB);
+  it("preserves visual position via `order` even when excluded", () => {
+    const presets = setupTwoSlotComposed({
+      order: ["voice/khs-compressor", "voice/khs-limiter"],
+      excluded: ["voice/khs-limiter"],
+    });
 
-    const presets = new Map<string, PresetDefinition>([
-      ["voice_base", {
-        name: "voice_base",
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["khs-compressor"]);
+    expect(resolved.excluded).toEqual(["voice/khs-limiter"]);
+  });
+
+  it("rejects an excluded entry referencing a slot that doesn't exist", () => {
+    const presets = setupTwoSlotComposed({ excluded: ["voice/missing"] });
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /'excluded' entry 'voice\/missing' references slot 'missing'/
+    );
+  });
+
+  it("rejects an excluded entry pointing at a source that isn't loaded", () => {
+    const presets = setupTwoSlotComposed({ excluded: ["typo/khs-limiter"] });
+
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /'excluded' entry 'typo\/khs-limiter' references unknown source 'typo'/
+    );
+  });
+});
+
+describe("resolvePreset — deactivated", () => {
+  function setupOneSlotComposed(extras: Partial<PresetDefinition> = {}): Map<string, LoadedPreset> {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    return new Map<string, LoadedPreset>([
+      ["voice", lp({
+        name: "voice",
         fxChainFile: "fx/voice.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["player_voice", {
-        name: "player_voice",
-        extends: "voice_base",
-        override: {
-          "de-esser": {
-            stateFile: "fx/de-esser-male.json",
-          },
-        },
-      }],
+        plugins: [{ id: "khs-compressor" }],
+      })],
+      ["composed", lp({
+        name: "composed",
+        imports: ["voice"],
+        ...extras,
+      })],
     ]);
+  }
 
-    const resolved = resolvePreset("player_voice", presets, tempDir);
-    expect(resolved.fxChain[0].origin).toBe("player_voice");
+  it("tags deactivated slots with bypassed=true and keeps them in the chain", () => {
+    const presets = setupOneSlotComposed({ deactivated: ["voice/khs-compressor"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain).toHaveLength(1);
+    expect(resolved.fxChain[0].slotId).toBe("khs-compressor");
+    expect(resolved.fxChain[0].bypassed).toBe(true);
   });
 
-  it("preserves root origin for non-overridden plugins", () => {
-    const plugins = [
-      {
-        pluginName: "AU: T-De-Esser 2 (Techivation)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "t-de-esser-2",
-        parameters: paramsA,
-      },
-      {
-        pluginName: "AU: kHs Limiter (Kilohearts)",
-        pluginType: "AU",
-        pluginParams: ["", "", 0, "", ""],
-        slotId: "khs-limiter",
-        parameters: paramsLimiter,
-      },
-    ];
-    writeFileSync(join(tempDir, "fx/multi.json"), JSON.stringify(plugins), "utf-8");
-    writeStateFile("fx/limiter-override.json", paramsLimiterOverride);
+  it("does NOT tag bypassed=true on a deactivated slot that is also excluded", () => {
+    const presets = setupOneSlotComposed({
+      deactivated: ["voice/khs-compressor"],
+      excluded: ["voice/khs-compressor"],
+    });
 
-    const presets = new Map<string, PresetDefinition>([
-      ["base", {
-        name: "base",
-        fxChainFile: "fx/multi.json",
-        plugins: [{ id: "de-esser" }, { id: "limiter" }],
-      }],
-      ["variant", {
-        name: "variant",
-        extends: "base",
-        override: {
-          "limiter": {
-            stateFile: "fx/limiter-override.json",
-          },
-        },
-      }],
-    ]);
-
-    const resolved = resolvePreset("variant", presets, tempDir);
-    expect(resolved.fxChain[0].origin).toBe("base");
-    expect(resolved.fxChain[1].origin).toBe("variant");
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain).toHaveLength(0);
+    expect(resolved.excluded).toEqual(["voice/khs-compressor"]);
   });
 
-  it("sets origin to child for added plugins", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_add.json", "AU: kHs Limiter (Kilohearts)", paramsLimiter);
+  it("rejects a deactivated entry referencing a slot that doesn't exist", () => {
+    const presets = setupOneSlotComposed({ deactivated: ["voice/missing"] });
 
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [{ id: "limiter", after: "de-esser" }],
-      }],
+    expect(() => resolvePreset("composed", presets)).toThrow(
+      /'deactivated' entry 'voice\/missing' references slot 'missing'/
+    );
+  });
+});
+
+describe("resolvePreset — versioning", () => {
+  it("produces different version hashes for differently-resolved chains", () => {
+    writeFxChainFile("fx/a.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    writeFxChainFile("fx/b.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsB },
     ]);
 
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain[0].origin).toBe("parent");
-    expect(resolved.fxChain[1].origin).toBe("child");
+    const presets = new Map<string, LoadedPreset>([
+      ["a", lp({ name: "a", fxChainFile: "fx/a.json", plugins: [{ id: "c-a" }] })],
+      ["b", lp({ name: "b", fxChainFile: "fx/b.json", plugins: [{ id: "c-b" }] })],
+    ]);
+
+    expect(resolvePreset("a", presets).version).not.toBe(
+      resolvePreset("b", presets).version
+    );
   });
 
-  it("appends added slots at end when no after specified", () => {
-    writePresetJson("fx/parent.json", "AU: T-De-Esser 2 (Techivation)", paramsA);
-    writePresetJson("fx/child_add.json", "AU: kHs Limiter (Kilohearts)", paramsLimiter);
-
-    const presets = new Map<string, PresetDefinition>([
-      ["parent", {
-        name: "parent",
-        fxChainFile: "fx/parent.json",
-        plugins: [{ id: "de-esser" }],
-      }],
-      ["child", {
-        name: "child",
-        extends: "parent",
-        fxChainFile: "fx/child_add.json",
-        add: [{ id: "limiter" }],
-      }],
+  it("produces a different version hash when a slot is deactivated", () => {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
     ]);
+    const base = new Map<string, LoadedPreset>([
+      ["voice", lp({ name: "voice", fxChainFile: "fx/voice.json", plugins: [{ id: "khs-compressor" }] })],
+      ["composed", lp({ name: "composed", imports: ["voice"] })],
+    ]);
+    const v1 = resolvePreset("composed", base).version;
 
-    const resolved = resolvePreset("child", presets, tempDir);
-    expect(resolved.fxChain).toHaveLength(2);
-    expect(resolved.fxChain[0].slotId).toBe("de-esser");
-    expect(resolved.fxChain[1].slotId).toBe("limiter");
+    base.set("composed", lp({
+      name: "composed",
+      imports: ["voice"],
+      deactivated: ["voice/khs-compressor"],
+    }));
+    const v2 = resolvePreset("composed", base).version;
+
+    expect(v1).not.toBe(v2);
   });
 });

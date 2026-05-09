@@ -28,6 +28,15 @@ export interface FxFingerprint {
   pluginParams?: (string | number)[];
   /** Preset name that owns this plugin's state (set during resolution) */
   origin?: string;
+  /** User-facing display name for this slot (e.g., "Aggressive low-cut").
+   *  Set from the preset's `plugins[].label` during resolution, or from the
+   *  per-track slot map for local additions (phase 3). UI prefers this over
+   *  pluginName when present. */
+  displayName?: string;
+  /** Whether this slot should be bypassed in REAPER. Set by the resolver
+   *  for slots listed in the preset's `deactivated` field; carried through
+   *  capture/apply by phase 3 wire-up. */
+  bypassed?: boolean;
   /** Parameter values captured via TrackFX_GetParam (keyed by param index as string) */
   parameters: Record<string, ParameterValue>;
   /** Base64 state blob from the RPP plugin block (for VST/VST3 full state restoration).

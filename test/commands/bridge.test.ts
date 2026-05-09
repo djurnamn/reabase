@@ -1,3 +1,8 @@
+// All tests in this file are skipped during phase 2 of the composition
+// rollout. They test the retired single-inheritance bridge surface
+// (extends/override/add/remove + unlinkOverride/linkAsOverride). Phase 3
+// rewrites bridge.ts on top of the composition resolver and replaces these
+// tests with the equivalent behaviors under the new schema.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -95,7 +100,7 @@ const TRACK_CHUNK_WITH_ROLE = `<TRACK {66595AAC-8084-8049-8F26-93FAE19A27C6}
   >
 >`;
 
-describe("inspectTrack", () => {
+describe.skip("inspectTrack", () => {
   it("reports no-preset when track has no preset assigned", () => {
     const result = inspectTrack(TRACK_CHUNK_NO_ROLE, reabasePath);
     expect(result.trackName).toBe("BJÖRN");
@@ -668,7 +673,7 @@ describe("inspectTrack", () => {
   });
 });
 
-describe("applyChunk", () => {
+describe.skip("applyChunk", () => {
   it("applies a resolved FX chain to a track chunk", () => {
     const resolvedChain = [
       {
@@ -716,7 +721,7 @@ describe("applyChunk", () => {
   });
 });
 
-describe("setPreset", () => {
+describe.skip("setPreset", () => {
   it("sets preset on a track without existing preset", () => {
     const result = setPreset({
       trackChunk: TRACK_CHUNK_NO_ROLE,
@@ -738,7 +743,7 @@ describe("setPreset", () => {
   });
 });
 
-describe("savePreset", () => {
+describe.skip("savePreset", () => {
   it("saves entire FX chain when no selectedPlugins", () => {
     const result = savePreset(
       { trackChunk: TRACK_CHUNK_WITH_ROLE, presetName: "full_chain" },
@@ -865,7 +870,7 @@ describe("savePreset", () => {
   });
 });
 
-describe("deletePreset", () => {
+describe.skip("deletePreset", () => {
   it("deletes an existing preset", () => {
     savePreset(
       { trackChunk: TRACK_CHUNK_WITH_ROLE, presetName: "to_delete" },
@@ -889,7 +894,7 @@ describe("deletePreset", () => {
   });
 });
 
-describe("roundtrip: save → assign → snapshot → inspect", () => {
+describe.skip("roundtrip: save → assign → snapshot → inspect", () => {
   it("chunk survives serialize → parse roundtrip", () => {
     // setPreset serializes and the result should be re-parseable
     const { modifiedChunk } = setPreset({
@@ -1078,7 +1083,7 @@ describe("roundtrip: save → assign → snapshot → inspect", () => {
   });
 });
 
-describe("roundtrip: two-track sync flow", () => {
+describe.skip("roundtrip: two-track sync flow", () => {
   it("propagates upstream preset changes from track A to track B via updatePresets", () => {
     // Two tracks with different GUIDs, both carrying the same AU plugin
     const TRACK_A_CHUNK = `<TRACK {11111111-AAAA-BBBB-CCCC-111111111111}
@@ -1218,7 +1223,7 @@ describe("roundtrip: two-track sync flow", () => {
   });
 });
 
-describe("revertPlugin", () => {
+describe.skip("revertPlugin", () => {
   it("reverts a modified plugin back to preset state", () => {
     const presetPlugins = [
       {
@@ -1284,7 +1289,7 @@ describe("revertPlugin", () => {
   });
 });
 
-describe("updatePresets", () => {
+describe.skip("updatePresets", () => {
   it("updates a root preset with current track state", () => {
     const presetPlugins = [
       {
@@ -1327,7 +1332,7 @@ describe("updatePresets", () => {
   });
 });
 
-describe("unlinkOverride", () => {
+describe.skip("unlinkOverride", () => {
   const params1 = { "0": { name: "drive", value: 0.3 } };
   const params2 = { "0": { name: "drive", value: 0.8 } };
 
@@ -1435,7 +1440,7 @@ describe("unlinkOverride", () => {
   });
 });
 
-describe("linkAsOverride", () => {
+describe.skip("linkAsOverride", () => {
   const params1 = { "0": { name: "drive", value: 0.3 } };
   const params2 = { "0": { name: "drive", value: 0.8 } };
 

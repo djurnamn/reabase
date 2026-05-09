@@ -1,189 +1,294 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { PresetDefinition, ResolvedPreset } from "./types.js";
-import type { FxFingerprint, ParameterValue } from "../snapshot/types.js";
+import type { LoadedPreset, ResolvedPreset } from "./types.js";
+import type { FxFingerprint } from "../snapshot/types.js";
 import { parsePresetFxChain } from "./rfxchain.js";
 import { hashParameters } from "../snapshot/capture.js";
-import { assignSlotIds, generateSlotId } from "../slot/identity.js";
+import { assignSlotIds } from "../slot/identity.js";
 
 /**
- * Resolve a preset by name, walking the inheritance chain and applying overrides.
+ * Resolve a composed preset to a flat FX chain.
  *
- * @param name - The preset name to resolve
- * @param presets - Map of all loaded preset definitions
- * @param presetsDirectory - Path to the presets/ directory (for resolving file paths)
+ * Algorithm:
+ *   1. Gather sources: the container's own plugins (when it has any) plus
+ *      each entry in `imports`. Each source contributes a list of
+ *      FxFingerprints with stable slotIds. Imported presets are loaded as
+ *      plain presets — nesting is forbidden, and the loader enforces that.
+ *   2. Reject same-slot-ID across sources. Naming discipline keeps slots
+ *      unique; if two sources collide, fix it by renaming one.
+ *   3. Build a lookup keyed by source then original slotId, each entry an
+ *      FxFingerprint with `origin` and `displayName` populated.
+ *   4. Walk `order` (or a default order) to build the visual chain. For
+ *      each entry: if in `excluded`, skip into the excluded-list; if in
+ *      `deactivated`, set `bypassed: true` on the fingerprint; otherwise
+ *      include as-is. Default order is each source's internal order, in
+ *      source-list order.
+ *   5. Drift: any surviving slot from a source that wasn't in `order` and
+ *      isn't excluded gets appended at the end. The status pipeline
+ *      detects this as `upstream-changes`.
+ *   6. Validate: every entry in `deactivated` and `excluded` must reference
+ *      a real slot. Any leftover entries error out.
+ *   7. Compute a version hash over the resolved fxChain (excluded slots
+ *      omitted).
  */
 export function resolvePreset(
   name: string,
-  presets: Map<string, PresetDefinition>,
-  presetsDirectory: string
+  presets: Map<string, LoadedPreset>
 ): ResolvedPreset {
   const definition = presets.get(name);
   if (!definition) {
     throw new Error(`Preset '${name}' not found`);
   }
 
-  // Build inheritance chain (root first)
-  const inheritanceChain = buildInheritanceChain(name, presets);
+  const sourcesList = gatherSources(definition, presets);
+  const sources = sourcesList.map((s) => s.source);
 
-  // Start with the root preset's FX chain
-  const rootName = inheritanceChain[0];
-  const rootDefinition = presets.get(rootName)!;
+  rejectCrossSourceCollisions(name, sourcesList);
 
-  let fxChain: FxFingerprint[] = [];
-  if (rootDefinition.fxChainFile) {
-    const presetPath = resolve(presetsDirectory, rootDefinition.fxChainFile);
-    const presetContent = readFileSync(presetPath, "utf-8");
-    fxChain = parsePresetFxChain(presetContent).map((fx) => ({
-      ...fx,
-      stateHash: hashParameters(fx.parameters),
-      origin: rootName,
-    }));
-  }
+  const lookupBySource = buildLookup(sourcesList);
 
-  // Assign slotIds from root's plugins list if present, otherwise auto-generate
-  if (rootDefinition.plugins) {
-    fxChain = fxChain.map((fx, i) => ({
-      ...fx,
-      slotId: rootDefinition.plugins![i]?.id ?? fx.slotId,
-    }));
-  } else {
-    fxChain = assignSlotIds(fxChain);
-  }
+  const excludedSet = new Set(definition.excluded ?? []);
+  const deactivatedSet = new Set(definition.deactivated ?? []);
 
-  // Apply each level of inheritance (skip root, it's already loaded)
-  for (let i = 1; i < inheritanceChain.length; i++) {
-    const levelName = inheritanceChain[i];
-    const levelDefinition = presets.get(levelName)!;
+  const { fxChain, mentionedEntries } =
+    definition.order && definition.order.length > 0
+      ? buildOrderedChain(definition, sourcesList, lookupBySource, excludedSet, deactivatedSet)
+      : buildDefaultOrderChain(sourcesList, lookupBySource, excludedSet, deactivatedSet);
 
-    // Slot-based override (keyed by slotId)
-    if (levelDefinition.override) {
-      fxChain = applySlotOverrides(
-        fxChain,
-        levelDefinition.override,
-        presetsDirectory,
-        levelName
-      );
-    }
-
-    // Remove slots by slotId
-    if (levelDefinition.remove) {
-      const removeSet = new Set(levelDefinition.remove);
-      fxChain = fxChain.filter((fx) => !removeSet.has(fx.slotId));
-    }
-
-    // Add new slots from child's fxChainFile
-    if (levelDefinition.add && levelDefinition.fxChainFile) {
-      const childPresetPath = resolve(presetsDirectory, levelDefinition.fxChainFile);
-      const childContent = readFileSync(childPresetPath, "utf-8");
-      const childPlugins = parsePresetFxChain(childContent).map((fx) => ({
-        ...fx,
-        stateHash: hashParameters(fx.parameters),
-      }));
-
-      // Assign slotIds from add entries
-      const existingIds = new Set(fxChain.map((fx) => fx.slotId));
-      const addedPlugins = childPlugins.map((fx, idx) => {
-        const addEntry = levelDefinition.add![idx];
-        const slotId = addEntry?.id ?? generateSlotId(fx.pluginName, existingIds);
-        existingIds.add(slotId);
-        return { ...fx, slotId, origin: levelName };
-      });
-
-      // Insert each added plugin at the specified position. `after` takes a
-      // slotId and places the new plugin immediately after it; `before` takes
-      // a slotId and places it immediately before. If the named anchor is not
-      // in the chain at this point in resolution (e.g., it's added later in
-      // the same level, or doesn't exist anywhere in the inheritance chain),
-      // we fall back to appending at the end.
-      for (const addedPlugin of addedPlugins) {
-        const addEntry = levelDefinition.add!.find((a) => a.id === addedPlugin.slotId);
-        if (addEntry?.after) {
-          const afterIndex = fxChain.findIndex((fx) => fx.slotId === addEntry.after);
-          if (afterIndex !== -1) {
-            fxChain.splice(afterIndex + 1, 0, addedPlugin);
-            continue;
-          }
-        } else if (addEntry?.before) {
-          const beforeIndex = fxChain.findIndex((fx) => fx.slotId === addEntry.before);
-          if (beforeIndex !== -1) {
-            fxChain.splice(beforeIndex, 0, addedPlugin);
-            continue;
-          }
-        }
-        fxChain.push(addedPlugin);
-      }
-    } else if (levelDefinition.fxChainFile && !levelDefinition.add) {
-      // Legacy behavior: append child's fxChainFile plugins at end
-      const childPresetPath = resolve(presetsDirectory, levelDefinition.fxChainFile);
-      const childContent = readFileSync(childPresetPath, "utf-8");
-      const childPlugins = parsePresetFxChain(childContent).map((fx) => ({
-        ...fx,
-        stateHash: hashParameters(fx.parameters),
-      }));
-      fxChain = [...fxChain, ...childPlugins];
-      // Re-assign slotIds after appending to ensure uniqueness
-      fxChain = assignSlotIds(fxChain);
+  // Drift: append any surviving slots not mentioned in `order` and not
+  // excluded. This kicks in when an import gains a plugin since the user
+  // last edited the composed preset.
+  for (const sp of sourcesList) {
+    const inner = lookupBySource.get(sp.source)!;
+    for (const sourceFp of sp.fxChain) {
+      const entry = `${sp.source}/${sourceFp.slotId}`;
+      if (mentionedEntries.has(entry)) continue;
+      if (excludedSet.has(entry)) continue;
+      const fp = inner.get(sourceFp.slotId)!;
+      fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
+      mentionedEntries.add(entry);
     }
   }
 
-  // Compute version hash from the resolved chain
+  validateRefList(name, definition.deactivated, "deactivated", lookupBySource, sources);
+  validateRefList(name, definition.excluded, "excluded", lookupBySource, sources);
+
   const versionInput = fxChain
-    .map((fx) => `${fx.pluginType}::${fx.pluginName}::${fx.stateHash}`)
+    .map((fx) => `${fx.pluginType}::${fx.pluginName}::${fx.stateHash}::${fx.bypassed ? "bypass" : "active"}`)
     .join("|");
-  const version = createHash("sha256").update(versionInput).digest("hex").slice(0, 12);
+  const version = createHash("sha256")
+    .update(versionInput)
+    .digest("hex")
+    .slice(0, 12);
 
   return {
     name,
-    inheritanceChain,
+    sources,
     fxChain,
+    excluded: definition.excluded ? [...definition.excluded] : [],
     version,
   };
 }
 
-/**
- * Build the inheritance chain for a preset, root-first.
- */
-function buildInheritanceChain(
-  name: string,
-  presets: Map<string, PresetDefinition>
-): string[] {
-  const chain: string[] = [];
-  let current: string | undefined = name;
+interface SourcePlugins {
+  source: string;
+  fxChain: FxFingerprint[];
+}
 
-  while (current) {
-    chain.unshift(current);
-    current = presets.get(current)?.extends;
+function gatherSources(
+  definition: LoadedPreset,
+  presets: Map<string, LoadedPreset>
+): SourcePlugins[] {
+  const sourcesList: SourcePlugins[] = [];
+
+  if (definition.fxChainFile) {
+    sourcesList.push({
+      source: definition.name,
+      fxChain: loadOwnPlugins(definition),
+    });
+  }
+
+  if (definition.imports) {
+    for (const importName of definition.imports) {
+      const importedDef = presets.get(importName);
+      if (!importedDef) {
+        throw new Error(
+          `Preset '${definition.name}' imports '${importName}' which does not exist`
+        );
+      }
+      const fxChain = importedDef.fxChainFile
+        ? loadOwnPlugins(importedDef)
+        : [];
+      sourcesList.push({ source: importName, fxChain });
+    }
+  }
+
+  return sourcesList;
+}
+
+function rejectCrossSourceCollisions(
+  presetName: string,
+  sourcesList: SourcePlugins[]
+): void {
+  const slotIdToFirstSource = new Map<string, string>();
+  for (const sp of sourcesList) {
+    for (const fp of sp.fxChain) {
+      const previous = slotIdToFirstSource.get(fp.slotId);
+      if (previous && previous !== sp.source) {
+        throw new Error(
+          `Preset '${presetName}': slot '${fp.slotId}' is defined in both ` +
+            `'${previous}' and '${sp.source}'. Slot IDs must be unique across all ` +
+            `sources — rename one of them.`
+        );
+      }
+      slotIdToFirstSource.set(fp.slotId, sp.source);
+    }
+  }
+}
+
+function buildLookup(
+  sourcesList: SourcePlugins[]
+): Map<string, Map<string, FxFingerprint>> {
+  const lookup = new Map<string, Map<string, FxFingerprint>>();
+  for (const sp of sourcesList) {
+    const inner = new Map<string, FxFingerprint>();
+    for (const fp of sp.fxChain) {
+      inner.set(fp.slotId, { ...fp, origin: sp.source });
+    }
+    lookup.set(sp.source, inner);
+  }
+  return lookup;
+}
+
+interface ChainBuildResult {
+  fxChain: FxFingerprint[];
+  /** "<source>/<slotId>" entries the chain build has already emitted or
+   *  consumed (excluded entries count as consumed). Used to detect drift. */
+  mentionedEntries: Set<string>;
+}
+
+function buildOrderedChain(
+  definition: LoadedPreset,
+  sourcesList: SourcePlugins[],
+  lookupBySource: Map<string, Map<string, FxFingerprint>>,
+  excludedSet: Set<string>,
+  deactivatedSet: Set<string>
+): ChainBuildResult {
+  const fxChain: FxFingerprint[] = [];
+  const mentionedEntries = new Set<string>();
+
+  for (const entry of definition.order!) {
+    const slashIndex = entry.indexOf("/");
+    const sourceName = entry.slice(0, slashIndex);
+    const slotId = entry.slice(slashIndex + 1);
+
+    const sourceLookup = lookupBySource.get(sourceName);
+    if (!sourceLookup) {
+      const known = sourcesList.map((s) => s.source).join(", ");
+      throw new Error(
+        `Preset '${definition.name}': order entry '${entry}' references unknown source '${sourceName}'. ` +
+          `Available sources: [${known}].`
+      );
+    }
+    const fp = sourceLookup.get(slotId);
+    if (!fp) {
+      throw new Error(
+        `Preset '${definition.name}': order entry '${entry}' references slot '${slotId}' ` +
+          `which does not exist in source '${sourceName}'.`
+      );
+    }
+
+    mentionedEntries.add(entry);
+    if (excludedSet.has(entry)) {
+      // Excluded slots are kept in `order` for visual position but are
+      // filtered out of the resolved (= apply target) chain. The UI walks
+      // `order` + the preset's `excluded` list to render them grayed.
+      continue;
+    }
+
+    fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
+  }
+
+  return { fxChain, mentionedEntries };
+}
+
+function buildDefaultOrderChain(
+  sourcesList: SourcePlugins[],
+  lookupBySource: Map<string, Map<string, FxFingerprint>>,
+  excludedSet: Set<string>,
+  deactivatedSet: Set<string>
+): ChainBuildResult {
+  const fxChain: FxFingerprint[] = [];
+  const mentionedEntries = new Set<string>();
+
+  for (const sp of sourcesList) {
+    const inner = lookupBySource.get(sp.source)!;
+    for (const sourceFp of sp.fxChain) {
+      const entry = `${sp.source}/${sourceFp.slotId}`;
+      mentionedEntries.add(entry);
+      if (excludedSet.has(entry)) continue;
+      const fp = inner.get(sourceFp.slotId)!;
+      fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
+    }
+  }
+
+  return { fxChain, mentionedEntries };
+}
+
+function validateRefList(
+  presetName: string,
+  list: string[] | undefined,
+  fieldName: "deactivated" | "excluded",
+  lookupBySource: Map<string, Map<string, FxFingerprint>>,
+  sources: string[]
+): void {
+  if (!list || list.length === 0) return;
+  for (const entry of list) {
+    const slashIndex = entry.indexOf("/");
+    const sourceName = entry.slice(0, slashIndex);
+    const slotId = entry.slice(slashIndex + 1);
+    const sourceLookup = lookupBySource.get(sourceName);
+    if (!sourceLookup) {
+      throw new Error(
+        `Preset '${presetName}': '${fieldName}' entry '${entry}' references unknown source '${sourceName}'. ` +
+          `Available sources: [${sources.join(", ")}].`
+      );
+    }
+    if (!sourceLookup.has(slotId)) {
+      throw new Error(
+        `Preset '${presetName}': '${fieldName}' entry '${entry}' references slot '${slotId}' ` +
+          `which does not exist in source '${sourceName}'.`
+      );
+    }
+  }
+}
+
+function loadOwnPlugins(definition: LoadedPreset): FxFingerprint[] {
+  if (!definition.fxChainFile) return [];
+
+  // `fxChainFile` is relative to the YAML's own folder, so co-located
+  // assets travel with the preset when a folder is moved.
+  const presetPath = resolve(definition._sourceDir, definition.fxChainFile);
+  const presetContent = readFileSync(presetPath, "utf-8");
+  let chain = parsePresetFxChain(presetContent).map((fx) => ({
+    ...fx,
+    stateHash: hashParameters(fx.parameters),
+  }));
+
+  if (definition.plugins) {
+    chain = chain.map((fx, i) => {
+      const entry = definition.plugins![i];
+      if (!entry) return fx;
+      return {
+        ...fx,
+        slotId: entry.id,
+        ...(entry.label !== undefined ? { displayName: entry.label } : {}),
+      };
+    });
+  } else {
+    chain = assignSlotIds(chain);
   }
 
   return chain;
-}
-
-/**
- * Apply slot-based overrides (keyed by slotId).
- * Override files are now JSON parameter maps.
- */
-function applySlotOverrides(
-  fxChain: FxFingerprint[],
-  overrides: Record<string, { stateFile: string }>,
-  presetsDirectory: string,
-  originPreset: string
-): FxFingerprint[] {
-  return fxChain.map((fx) => {
-    const override = overrides[fx.slotId];
-    if (override) {
-      const stateFilePath = resolve(presetsDirectory, override.stateFile);
-      const newParams: Record<string, ParameterValue> = JSON.parse(
-        readFileSync(stateFilePath, "utf-8")
-      );
-      return {
-        ...fx,
-        parameters: newParams,
-        stateHash: hashParameters(newParams),
-        origin: originPreset,
-      };
-    }
-    return fx;
-  });
 }

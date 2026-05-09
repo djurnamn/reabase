@@ -5,21 +5,33 @@ export interface SlotMapEntry {
   pluginType: string;
   pluginName: string;
   stateHash: string;
+  /** Optional track-local label. Surfaces as `fp.displayName` for plugins
+   *  without a preset-provided label (e.g. local additions or for renaming
+   *  what the UI shows on a per-track basis). Set via the `rename-slot`
+   *  bridge command; backwards compatible — slot maps without this field
+   *  read fine. */
+  label?: string;
 }
 
 export type SlotMap = Record<string, SlotMapEntry>;
 
 /**
- * Build a slot map from a fingerprint chain.
+ * Build a slot map from a fingerprint chain. Preserves any existing label
+ * on the fingerprint via `displayName` so renaming round-trips through
+ * subsequent capture/serialize cycles.
  */
 export function buildSlotMap(chain: FxFingerprint[]): SlotMap {
   const map: SlotMap = {};
   for (const fx of chain) {
-    map[fx.slotId] = {
+    const entry: SlotMapEntry = {
       pluginType: fx.pluginType,
       pluginName: fx.pluginName,
       stateHash: fx.stateHash,
     };
+    if (fx.displayName && fx.displayName.length > 0) {
+      entry.label = fx.displayName;
+    }
+    map[fx.slotId] = entry;
   }
   return map;
 }
@@ -94,7 +106,7 @@ export function resolveSlotIds(
         entry.pluginName === fx.pluginName &&
         entry.stateHash === fx.stateHash
       ) {
-        result[i] = { ...fx, slotId };
+        result[i] = applyMapEntry(fx, slotId, entry);
         usedSlotIds.add(slotId);
         matched = true;
         break;
@@ -129,7 +141,7 @@ export function resolveSlotIds(
     const queue = unusedByIdentity.get(key);
     if (queue && queue.length > 0) {
       const slotId = queue.shift()!;
-      result[i] = { ...fx, slotId };
+      result[i] = applyMapEntry(fx, slotId, slotMap[slotId]);
       usedSlotIds.add(slotId);
     } else {
       stillUnmatched.push(i);
@@ -149,5 +161,23 @@ export function resolveSlotIds(
     result[i] = { ...fx, slotId };
   }
 
+  return result;
+}
+
+/**
+ * Apply a slot map entry to a captured fingerprint: assigns the stored
+ * slotId and surfaces any stored `label` as `displayName`. A captured
+ * fingerprint already carrying a `displayName` (set by upstream resolver
+ * logic) keeps the captured value if the slot map has no override.
+ */
+function applyMapEntry(
+  fx: FxFingerprint,
+  slotId: string,
+  entry: SlotMapEntry
+): FxFingerprint {
+  const result: FxFingerprint = { ...fx, slotId };
+  if (entry.label && entry.label.length > 0) {
+    result.displayName = entry.label;
+  }
   return result;
 }

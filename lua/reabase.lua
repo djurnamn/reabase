@@ -1607,7 +1607,7 @@ local function render_tab_bar()
   if not inspect then return end
 
   local has_preset = inspect.preset and inspect.preset ~= ""
-  local chain = inspect.inheritanceChain or {}
+  local chain = inspect.sources or {}
 
   -- Default selected_tab
   if not state.selected_tab then
@@ -1816,7 +1816,7 @@ local function render_fx_table()
 
   local show_create_checkboxes = is_creation_tab()
   local has_preset = inspect.preset and inspect.preset ~= ""
-  local has_tabs = has_preset and inspect.inheritanceChain and #inspect.inheritanceChain > 0
+  local has_tabs = has_preset and inspect.sources and #inspect.sources > 0
   local show_ownership = has_tabs and not show_create_checkboxes
   -- Show checkbox column if ownership OR creation checkboxes are needed
   local show_checkbox = show_ownership or show_create_checkboxes
@@ -1908,9 +1908,9 @@ local function render_fx_table()
       if not state.selected_tab then return false end
       if is_creation_tab() then return false end
       local inspect_data = state.inspect
-      if not inspect_data or not inspect_data.inheritanceChain then return false end
+      if not inspect_data or not inspect_data.sources then return false end
       -- Current tab must not be the root preset (must have ancestors)
-      local chain_list = inspect_data.inheritanceChain
+      local chain_list = inspect_data.sources
       if #chain_list < 2 then return false end
       -- Current tab must be after the first in the chain (i.e., is a child)
       local tab_idx = nil
@@ -2083,7 +2083,7 @@ local function render_fx_table()
             -- present a selection dialog to choose which one to override.
             -- For now, find the first matching ancestor slot.
             local inspect_data = state.inspect
-            local chain_list = inspect_data and inspect_data.inheritanceChain or {}
+            local chain_list = inspect_data and inspect_data.sources or {}
             local tab_idx = 0
             for ci, name in ipairs(chain_list) do
               if name == state.selected_tab then tab_idx = ci; break end
@@ -2228,8 +2228,8 @@ local function render_save_preset_modal()
       local extends_preset = nil
       if state.selected_tab == EXTEND_TAB then
         local inspect = state.inspect
-        if inspect and inspect.inheritanceChain and #inspect.inheritanceChain > 0 then
-          extends_preset = inspect.inheritanceChain[#inspect.inheritanceChain]  -- leaf
+        if inspect and inspect.sources and #inspect.sources > 0 then
+          extends_preset = inspect.sources[#inspect.sources]  -- leaf
         end
       end
       reaper.ImGui_CloseCurrentPopup(ctx)

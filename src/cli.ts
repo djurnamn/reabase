@@ -5,11 +5,11 @@ import { init } from "./commands/init.js";
 import { status } from "./commands/status.js";
 import { compute } from "./commands/compute.js";
 import { planSync, executeSync } from "./commands/sync.js";
-import { inspectTrack, applyChunk, setPreset, snapshotTrack, savePreset, deletePreset, revertPlugin, updatePresets, unlinkOverride, linkAsOverride } from "./commands/bridge.js";
+import { inspectTrack, applyChunk, setPreset, snapshotTrack, savePreset, deletePreset, revertPlugin, updatePresets, updateCompositionBridge, renameSlot } from "./commands/bridge.js";
 import { loadPresets } from "./preset/loader.js";
 import { findReabaseRoot } from "./utilities/discovery.js";
 import type { ComputeInput } from "./commands/compute.js";
-import type { ApplyChunkInput, SetPresetInput, SnapshotInput, SavePresetInput, DeletePresetInput, RevertPluginInput, UpdatePresetsInput, UnlinkOverrideInput, LinkAsOverrideInput } from "./commands/bridge.js";
+import type { ApplyChunkInput, SetPresetInput, SnapshotInput, SavePresetInput, DeletePresetInput, RevertPluginInput, UpdatePresetsInput, UpdateCompositionInput, RenameSlotInput } from "./commands/bridge.js";
 
 const program = new Command()
   .name("reabase")
@@ -208,14 +208,18 @@ program
     }
 
     try {
-      const presets = loadPresets(reabasePath + "/presets");
+      const { presets, categories } = loadPresets(reabasePath + "/presets");
 
       if (options.json) {
         const list = [...presets.values()].map((p) => ({
           name: p.name,
           description: p.description,
-          extends: p.extends,
+          imports: p.imports,
           fxChainFile: p.fxChainFile,
+          category: {
+            slug: p._categorySlug,
+            label: categories.get(p._categorySlug)?.label ?? p._categorySlug,
+          },
         }));
         console.log(JSON.stringify(list));
         return;
@@ -229,13 +233,28 @@ program
         return;
       }
 
-      for (const [, preset] of presets) {
-        const extendsStr = preset.extends
-          ? ` (extends ${preset.extends})`
-          : "";
-        console.log(`  ${preset.name}${extendsStr}`);
-        if (preset.description) {
-          console.log(`    ${preset.description}`);
+      // Group presets by category slug for display.
+      const bySlug = new Map<string, typeof presets extends Map<infer _, infer V> ? V[] : never>();
+      for (const preset of presets.values()) {
+        const slug = preset._categorySlug;
+        const list = bySlug.get(slug) ?? [];
+        list.push(preset);
+        bySlug.set(slug, list);
+      }
+
+      const orderedSlugs = [...bySlug.keys()].sort();
+      for (const slug of orderedSlugs) {
+        const label = categories.get(slug)?.label ?? slug;
+        if (label.length > 0) console.log(`\n${label}`);
+        for (const preset of bySlug.get(slug)!) {
+          const importsStr =
+            preset.imports && preset.imports.length > 0
+              ? ` (imports ${preset.imports.join(", ")})`
+              : "";
+          console.log(`  ${preset.name}${importsStr}`);
+          if (preset.description) {
+            console.log(`    ${preset.description}`);
+          }
         }
       }
     } catch (error) {
@@ -463,25 +482,16 @@ program
     }
   });
 
-// ─── unlink-override ─────────────────────────────────────────────
+// ─── rename-slot ─────────────────────────────────────────────────
 
 program
-  .command("unlink-override")
-  .description("Convert a child override into a separate addition (reads JSON from stdin)")
-  .option("-p, --path <path>", "path to search from", ".")
-  .action(async (options: { path: string }) => {
-    const reabasePath = findReabaseRoot(options.path);
-    if (!reabasePath) {
-      console.error(
-        JSON.stringify({ error: "No .reabase/ directory found" })
-      );
-      process.exit(1);
-    }
-
+  .command("rename-slot")
+  .description("Set or clear a track-local label on a slot (reads JSON from stdin)")
+  .action(async () => {
     try {
       const inputJson = await readStdin();
-      const input: UnlinkOverrideInput = JSON.parse(inputJson);
-      const result = unlinkOverride(input, reabasePath);
+      const input: RenameSlotInput = JSON.parse(inputJson);
+      const result = renameSlot(input);
       console.log(JSON.stringify(result));
     } catch (error) {
       console.error(
@@ -491,11 +501,11 @@ program
     }
   });
 
-// ─── link-as-override ────────────────────────────────────────────
+// ─── update-composition ──────────────────────────────────────────
 
 program
-  .command("link-as-override")
-  .description("Convert a child addition into an override of a parent slot (reads JSON from stdin)")
+  .command("update-composition")
+  .description("Edit a composed preset's imports/order/deactivated/excluded (reads JSON from stdin)")
   .option("-p, --path <path>", "path to search from", ".")
   .action(async (options: { path: string }) => {
     const reabasePath = findReabaseRoot(options.path);
@@ -508,8 +518,8 @@ program
 
     try {
       const inputJson = await readStdin();
-      const input: LinkAsOverrideInput = JSON.parse(inputJson);
-      const result = linkAsOverride(input, reabasePath);
+      const input: UpdateCompositionInput = JSON.parse(inputJson);
+      const result = updateCompositionBridge(input, reabasePath);
       console.log(JSON.stringify(result));
     } catch (error) {
       console.error(

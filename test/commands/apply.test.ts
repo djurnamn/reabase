@@ -118,6 +118,39 @@ describe("applyResolvedChainToTrack", () => {
     expect(getFxPluginName(plugins[2])).toBe("AU: Limiter (Generic)");
   });
 
+  it("emits BYPASS 1 0 0 for bypassed slots and BYPASS 0 0 0 for active ones", () => {
+    const root = parseRpp(readFixture("single-track-with-fx.rpp"));
+    const track = getTracks(root)[0];
+
+    const newChain: FxFingerprint[] = [
+      {
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        pluginType: "AU",
+        stateHash: "hash_filter",
+        slotId: "khs-filter",
+        parameters: {},
+        bypassed: true,
+      },
+      {
+        pluginName: "AU: kHs Compressor (Kilohearts)",
+        pluginType: "AU",
+        stateHash: "hash_comp",
+        slotId: "khs-compressor",
+        parameters: {},
+      },
+    ];
+
+    applyResolvedChainToTrack(track, newChain);
+    const wrapper = { kind: "node" as const, token: "REAPER_PROJECT", params: [], children: [track] };
+    const serialized = serializeRpp(wrapper);
+
+    // Two BYPASS structs total: first 1 0 0 (filter is bypassed), then 0 0 0.
+    const bypassLines = serialized.split("\n").filter((l) => l.trim().startsWith("BYPASS"));
+    expect(bypassLines).toHaveLength(2);
+    expect(bypassLines[0].trim()).toBe("BYPASS 1 0 0");
+    expect(bypassLines[1].trim()).toBe("BYPASS 0 0 0");
+  });
+
   it("includes AU component identifiers in the plugin opening line", () => {
     const root = parseRpp(readFixture("single-track-with-fx.rpp"));
     const track = getTracks(root)[0];

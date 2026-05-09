@@ -25,6 +25,16 @@ function arraysEqual(a: string[], b: string[]): boolean {
 }
 
 /**
+ * Two fingerprints have the "same state" iff their parameter hash AND their
+ * bypass flag both match. Bypass is normalised so undefined and false read
+ * as the same — slots without a bypass flag are active.
+ */
+function fxStateEqual(a: FxFingerprint, b: FxFingerprint): boolean {
+  if (a.stateHash !== b.stateHash) return false;
+  return (a.bypassed === true) === (b.bypassed === true);
+}
+
+/**
  * Three-way merge of FX chains.
  *
  * Content is decided per-slot via the standard three-way logic
@@ -188,8 +198,8 @@ function resolveActionForKey(
 ): MergeAction {
   // Present in all three — the common case.
   if (oldFx && newFx && localFx) {
-    const baseChanged = oldFx.stateHash !== newFx.stateHash;
-    const localChanged = oldFx.stateHash !== localFx.stateHash;
+    const baseChanged = !fxStateEqual(oldFx, newFx);
+    const localChanged = !fxStateEqual(oldFx, localFx);
 
     if (!baseChanged && !localChanged) {
       return { type: "keep_base", fx: oldFx };
@@ -200,14 +210,15 @@ function resolveActionForKey(
     if (!baseChanged && localChanged) {
       return { type: "keep_local", fx: localFx };
     }
-    if (newFx.stateHash === localFx.stateHash) {
+    if (fxStateEqual(newFx, localFx)) {
       // Both changed the same way.
       return { type: "keep_local", fx: localFx };
     }
-    // Both diverged from the snapshot AND from each other at the plugin
-    // hash level. Try a per-parameter three-way merge: if local and upstream
-    // edited disjoint params, fold them together instead of declaring a
-    // plugin-level conflict (Bug 2).
+    // Both diverged from the snapshot AND from each other. Try a
+    // per-parameter three-way merge that also folds disjoint bypass edits:
+    // if local and upstream edited disjoint params (and at most one side
+    // toggled bypass), fold them together instead of declaring a
+    // plugin-level conflict (Bug 2 + bypass round-trip).
     const merged = tryMergeParams(oldFx, newFx, localFx);
     if (merged) {
       return { type: "merge_params", fx: merged };
@@ -222,7 +233,7 @@ function resolveActionForKey(
 
   // Present in old + new, removed locally.
   if (oldFx && newFx && !localFx) {
-    if (oldFx.stateHash === newFx.stateHash) {
+    if (fxStateEqual(oldFx, newFx)) {
       return { type: "remove_local", fx: newFx };
     }
     return {
@@ -235,7 +246,7 @@ function resolveActionForKey(
 
   // Present in old + local, removed upstream.
   if (oldFx && !newFx && localFx) {
-    if (oldFx.stateHash === localFx.stateHash) {
+    if (fxStateEqual(oldFx, localFx)) {
       return {
         type: "remove",
         pluginName: localFx.pluginName,
@@ -258,7 +269,7 @@ function resolveActionForKey(
 
   // Added in both base and local.
   if (!oldFx && newFx && localFx) {
-    if (newFx.stateHash === localFx.stateHash) {
+    if (fxStateEqual(newFx, localFx)) {
       return { type: "keep_local", fx: localFx };
     }
     return {
@@ -314,12 +325,35 @@ function getResolvedFx(action: MergeAction): FxFingerprint {
  * The merged fingerprint inherits local's stateBlob: Lua applies the
  * merged params on top of the local plugin via TrackFX_SetParam, so the
  * blob never needs to round-trip through serialization.
+ *
+ * Bypass is folded in alongside parameters: a one-sided bypass toggle is
+ * absorbed cleanly; a two-sided disagreement (snapshot=off, local=on,
+ * new=off-but-different-meaning) is treated as a real conflict.
  */
 function tryMergeParams(
   oldFx: FxFingerprint,
   newFx: FxFingerprint,
   localFx: FxFingerprint
 ): FxFingerprint | null {
+  // Three-way merge of bypass first. Either side toggling is fine; both
+  // sides setting different end-states is a conflict (rare in practice
+  // since bypass is binary, but guarded for completeness).
+  const oldBypass = oldFx.bypassed === true;
+  const newBypass = newFx.bypassed === true;
+  const localBypass = localFx.bypassed === true;
+  const baseBypassChanged = oldBypass !== newBypass;
+  const localBypassChanged = oldBypass !== localBypass;
+  let mergedBypass: boolean;
+  if (baseBypassChanged && localBypassChanged && newBypass !== localBypass) {
+    return null;
+  } else if (baseBypassChanged && !localBypassChanged) {
+    mergedBypass = newBypass;
+  } else if (!baseBypassChanged && localBypassChanged) {
+    mergedBypass = localBypass;
+  } else {
+    mergedBypass = oldBypass;
+  }
+
   const allKeys = new Set<string>([
     ...Object.keys(oldFx.parameters),
     ...Object.keys(newFx.parameters),
@@ -327,8 +361,17 @@ function tryMergeParams(
   ]);
 
   // No per-parameter data available — divergent stateHashes must be coming
-  // from something we can't see (e.g., stateBlob), so we can't auto-merge.
-  if (allKeys.size === 0) return null;
+  // from something we can't see (e.g., stateBlob). If only bypass differs,
+  // we can still emit a merged fingerprint with the merged bypass.
+  if (allKeys.size === 0) {
+    if (oldFx.stateHash === newFx.stateHash && oldFx.stateHash === localFx.stateHash) {
+      return {
+        ...localFx,
+        ...(mergedBypass ? { bypassed: true } : { bypassed: undefined }),
+      };
+    }
+    return null;
+  }
 
   const merged: Record<string, ParameterValue> = {};
   for (const key of allKeys) {
@@ -379,5 +422,6 @@ function tryMergeParams(
     ...localFx,
     parameters: merged,
     stateHash: hashParameters(merged),
+    ...(mergedBypass ? { bypassed: true } : { bypassed: undefined }),
   };
 }

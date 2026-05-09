@@ -437,4 +437,67 @@ describe("threeWayMerge", () => {
       expect(result.resolvedChain[1].stateHash).toBe("hash_high_shelf_tweaked");
     });
   });
+
+  describe("bypass round-trip", () => {
+    function bp(fp: FxFingerprint, bypassed: boolean): FxFingerprint {
+      return bypassed ? { ...fp, bypassed: true } : { ...fp, bypassed: undefined };
+    }
+
+    it("treats a local bypass toggle as a local edit (keep_local)", () => {
+      const old = makeFx("EQ", "v1", "AU", "eq");
+      const next = makeFx("EQ", "v1", "AU", "eq");
+      const local = bp(makeFx("EQ", "v1", "AU", "eq"), true);
+
+      const result = threeWayMerge([old], [next], [local]);
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("keep_local");
+      expect(result.resolvedChain[0].bypassed).toBe(true);
+    });
+
+    it("treats a preset deactivate as upstream (use_new_base)", () => {
+      const old = makeFx("EQ", "v1", "AU", "eq");
+      const next = bp(makeFx("EQ", "v1", "AU", "eq"), true);
+      const local = makeFx("EQ", "v1", "AU", "eq");
+
+      const result = threeWayMerge([old], [next], [local]);
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("use_new_base");
+      expect(result.resolvedChain[0].bypassed).toBe(true);
+    });
+
+    it("merges disjoint changes: local bypass toggle + upstream param edit", () => {
+      const oldFx = makeFxWithParams("Comp", { "0": 0.5 });
+      const newFx = makeFxWithParams("Comp", { "0": 0.8 });
+      const localFx = bp(makeFxWithParams("Comp", { "0": 0.5 }), true);
+
+      const result = threeWayMerge([oldFx], [newFx], [localFx]);
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("merge_params");
+      // Merged fingerprint carries upstream's param value AND local's bypass.
+      expect(result.resolvedChain[0].parameters["0"].value).toBe(0.8);
+      expect(result.resolvedChain[0].bypassed).toBe(true);
+    });
+
+    it("no-op when bypass and params match across all three", () => {
+      const old = makeFx("EQ", "v1", "AU", "eq");
+      const next = makeFx("EQ", "v1", "AU", "eq");
+      const local = makeFx("EQ", "v1", "AU", "eq");
+
+      const result = threeWayMerge([old], [next], [local]);
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("keep_base");
+      expect(result.resolvedChain[0].bypassed).toBeUndefined();
+    });
+
+    it("treats both sides toggling bypass in the same direction as keep_local", () => {
+      const old = makeFx("EQ", "v1", "AU", "eq");
+      const next = bp(makeFx("EQ", "v1", "AU", "eq"), true);
+      const local = bp(makeFx("EQ", "v1", "AU", "eq"), true);
+
+      const result = threeWayMerge([old], [next], [local]);
+      expect(result.hasConflicts).toBe(false);
+      expect(result.actions[0].type).toBe("keep_local");
+      expect(result.resolvedChain[0].bypassed).toBe(true);
+    });
+  });
 });

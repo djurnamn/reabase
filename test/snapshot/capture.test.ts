@@ -62,6 +62,43 @@ describe("captureFxChain", () => {
     expect(bjornChain[0].stateHash).toBe("");
     expect(bjornChain[0].parameters).toEqual({});
   });
+
+  it("reads BYPASS state and surfaces it as fp.bypassed", () => {
+    // Synthesise a track chunk with a BYPASS-toggled plugin and an
+    // active one to verify the per-plugin BYPASS lookup, not just a
+    // global flag.
+    const chunk = `<REAPER_PROJECT
+<TRACK {00000000-0000-0000-0000-000000000000}
+NAME mixed
+<FXCHAIN
+SHOW 0
+LASTSEL -1
+DOCKED 0
+BYPASS 1 0 0
+<AU "AU: kHs Filter (Kilohearts)" "Kilohearts: kHs Filter" "" 0 0 0
+>
+FLOATPOS 0 0 0 0
+FXID {00000000-0000-0000-0000-000000000000}
+WAK 0 0
+BYPASS 0 0 0
+<AU "AU: kHs Compressor (Kilohearts)" "Kilohearts: kHs Compressor" "" 0 0 0
+>
+FLOATPOS 0 0 0 0
+FXID {00000000-0000-0000-0000-000000000000}
+WAK 0 0
+>
+>
+>`;
+    const root = parseRpp(chunk);
+    const track = getTracks(root)[0];
+    const chain = captureFxChain(track);
+
+    expect(chain).toHaveLength(2);
+    expect(chain[0].pluginName).toContain("kHs Filter");
+    expect(chain[0].bypassed).toBe(true);
+    expect(chain[1].pluginName).toContain("kHs Compressor");
+    expect(chain[1].bypassed).toBeUndefined();
+  });
 });
 
 describe("hashParameters", () => {

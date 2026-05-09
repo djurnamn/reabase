@@ -1,168 +1,123 @@
 import { join, resolve } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import YAML from "yaml";
-import type { PresetDefinition } from "./types.js";
+import type { LoadedPreset } from "./types.js";
 import type { FxFingerprint } from "../snapshot/types.js";
 import { serializePresetFxChain } from "./rfxchain.js";
-import { hashParameters } from "../snapshot/capture.js";
 
 /**
- * Regenerate a root preset's JSON preset file and plugins list from current fingerprints.
+ * Persist a preset's own plugins (the `plugins` list and `fxChainFile`)
+ * from the given fingerprints. Composition fields — `imports`, `order`,
+ * `deactivated`, `excluded` — are preserved verbatim from the existing
+ * YAML; they are managed by `updateComposition`, not here.
+ *
+ * Each fingerprint's `displayName` round-trips into `plugins[].label`. An
+ * empty or missing `displayName` clears the label. Slot IDs come from the
+ * fingerprint's `slotId` (which the resolver already deduplicates).
+ *
+ * Writes happen inside the preset's source folder (`_sourceDir`) so a
+ * preset that lives in `presets/voices/` keeps its YAML and its
+ * `fx/<name>.json` co-located there.
+ *
+ * Use this for both plain presets and the container's own plugins of a
+ * composed preset — they share the same on-disk shape.
  */
-export function updateRootPreset(
-  presetsDirectory: string,
-  definition: PresetDefinition,
+export function updatePresetOwnPlugins(
+  definition: LoadedPreset,
   ownedFingerprints: FxFingerprint[]
 ): void {
-  if (!definition.fxChainFile) {
-    throw new Error(`Root preset '${definition.name}' has no fxChainFile`);
+  const safeFilename = slugifyName(definition.name);
+  const fxDirectory = join(definition._sourceDir, "fx");
+  mkdirSync(fxDirectory, { recursive: true });
+
+  const fxChainRelPath = definition.fxChainFile ?? `fx/${safeFilename}.json`;
+  const fxChainAbsPath = resolve(definition._sourceDir, fxChainRelPath);
+  const yamlPath = join(definition._sourceDir, `${safeFilename}.yaml`);
+
+  // Read the existing YAML so we can preserve fields the writer doesn't
+  // own (composition fields, description). Falls back to a fresh document
+  // when no YAML exists yet (new preset).
+  const existing = existsSync(yamlPath)
+    ? (YAML.parse(readFileSync(yamlPath, "utf-8")) as Record<string, unknown>)
+    : { name: definition.name };
+
+  if (ownedFingerprints.length > 0) {
+    writeFileSync(
+      fxChainAbsPath,
+      serializePresetFxChain(ownedFingerprints),
+      "utf-8"
+    );
+    existing.fxChainFile = fxChainRelPath;
+    existing.plugins = ownedFingerprints.map((fp) => {
+      const entry: { id: string; label?: string } = { id: fp.slotId };
+      if (fp.displayName && fp.displayName.length > 0) {
+        entry.label = fp.displayName;
+      }
+      return entry;
+    });
+  } else {
+    // No owned plugins → drop the fxChainFile/plugins fields entirely.
+    delete existing.fxChainFile;
+    delete existing.plugins;
   }
 
-  const presetFilePath = resolve(presetsDirectory, definition.fxChainFile);
-
-  // Regenerate JSON preset from fingerprints
-  const presetContent = serializePresetFxChain(ownedFingerprints);
-  writeFileSync(presetFilePath, presetContent, "utf-8");
-
-  // Update plugins list in YAML
-  const safeFilename = definition.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_|_$/g, "");
-  const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
-
-  const yamlDefinition: Record<string, unknown> = {
-    name: definition.name,
-  };
-  if (definition.description) {
-    yamlDefinition.description = definition.description;
-  }
-  yamlDefinition.fxChainFile = definition.fxChainFile;
-  yamlDefinition.plugins = ownedFingerprints.map((fp) => ({ id: fp.slotId }));
-
-  writeFileSync(yamlPath, YAML.stringify(yamlDefinition), "utf-8");
+  writeFileSync(yamlPath, YAML.stringify(existing), "utf-8");
 }
 
 /**
- * Update a child preset's overrides and additions based on current fingerprints.
+ * Edit a composed preset's composition fields — `imports`, `order`,
+ * `deactivated`, `excluded` — in one shot. Preserves the preset's own
+ * plugins, description, and any fields not passed in.
  *
- * For each owned slot:
- * - If slotId exists in parent chain and state differs: write param file + override entry
- * - If slotId exists in parent chain and state matches: remove override (inherits naturally)
- * - If slotId not in parent chain: add entry + include in child preset file
- *
- * Add entries are emitted in the order they appear in the track's full chain,
- * with anchors picked so the resolver reproduces that order exactly:
- * - Closest preceding "known" slot (parent slot, or earlier-emitted addition) → `after:`.
- * - Otherwise, closest following parent slot → `before:`.
- * - Otherwise (no anchor) → appended at end.
- *
- * `fullChain` is the full track chain (in order) — needed to figure out where
- * each owned addition sits relative to parent slots, which is how `before:`
- * gets generated when an owned plugin is positioned ahead of any parent slot.
+ * Pass `undefined` to leave a field alone; pass an empty array to clear
+ * it. The Lua UI typically sends the full new state of everything it
+ * manages so this distinction rarely matters in practice.
  */
-export function updateChildPreset(
-  presetsDirectory: string,
-  definition: PresetDefinition,
-  parentChain: FxFingerprint[],
-  fullChain: FxFingerprint[],
-  ownedSlotIds: string[]
+export function updateComposition(
+  definition: LoadedPreset,
+  fields: {
+    imports?: string[];
+    order?: string[];
+    deactivated?: string[];
+    excluded?: string[];
+  }
 ): void {
-  const fxDirectory = join(presetsDirectory, "fx");
-  mkdirSync(fxDirectory, { recursive: true });
-
-  const parentSlotIdSet = new Set(parentChain.map((fx) => fx.slotId));
-  const ownedSet = new Set(ownedSlotIds);
-  const overrides: Record<string, { stateFile: string }> = {};
-  const additions: FxFingerprint[] = [];
-  const addEntries: Array<{ id: string; after?: string; before?: string }> = [];
-
-  for (let i = 0; i < fullChain.length; i++) {
-    const fp = fullChain[i];
-    if (!ownedSet.has(fp.slotId)) continue;
-
-    if (parentSlotIdSet.has(fp.slotId)) {
-      // Owned slot is inherited from parent — check whether to write an override.
-      const parentFp = parentChain.find((pfx) => pfx.slotId === fp.slotId);
-      if (parentFp && parentFp.stateHash !== fp.stateHash) {
-        const stateFileName = `fx/${definition.name}_${fp.slotId}.json`;
-        const stateFilePath = resolve(presetsDirectory, stateFileName);
-        writeFileSync(stateFilePath, JSON.stringify(fp.parameters, null, 2), "utf-8");
-        overrides[fp.slotId] = { stateFile: stateFileName };
-      }
-      // State matches → inherit naturally, no override.
-      continue;
-    }
-
-    // Owned slot is an addition. Pick the anchor that will reproduce its
-    // current chain position when the resolver replays the YAML.
-    additions.push(fp);
-
-    // "Known" slots at this point in the YAML walk: parent slots plus any
-    // additions we've already emitted. Future additions aren't known yet,
-    // so they can't serve as anchors here.
-    const knownAtThisPoint = new Set<string>([
-      ...parentSlotIdSet,
-      ...addEntries.map((e) => e.id),
-    ]);
-
-    const entry: { id: string; after?: string; before?: string } = { id: fp.slotId };
-
-    for (let j = i - 1; j >= 0; j--) {
-      if (knownAtThisPoint.has(fullChain[j].slotId)) {
-        entry.after = fullChain[j].slotId;
-        break;
-      }
-    }
-    if (!entry.after) {
-      for (let j = i + 1; j < fullChain.length; j++) {
-        if (knownAtThisPoint.has(fullChain[j].slotId)) {
-          entry.before = fullChain[j].slotId;
-          break;
-        }
-      }
-    }
-
-    addEntries.push(entry);
+  const safeFilename = slugifyName(definition.name);
+  const yamlPath = join(definition._sourceDir, `${safeFilename}.yaml`);
+  if (!existsSync(yamlPath)) {
+    throw new Error(`Preset '${definition.name}' not found at ${yamlPath}`);
   }
 
-  // Build YAML definition
-  const safeFilename = definition.name
+  const doc = YAML.parse(readFileSync(yamlPath, "utf-8")) as Record<string, unknown>;
+
+  applyCompositionField(doc, "imports", fields.imports);
+  applyCompositionField(doc, "order", fields.order);
+  applyCompositionField(doc, "deactivated", fields.deactivated);
+  applyCompositionField(doc, "excluded", fields.excluded);
+
+  writeFileSync(yamlPath, YAML.stringify(doc), "utf-8");
+}
+
+function applyCompositionField(
+  doc: Record<string, unknown>,
+  field: "imports" | "order" | "deactivated" | "excluded",
+  value: string[] | undefined
+): void {
+  if (value === undefined) return;
+  if (value.length === 0) {
+    delete doc[field];
+  } else {
+    doc[field] = value;
+  }
+}
+
+/**
+ * Slugify a preset name for use as a filename. Mirrors what the bridge
+ * already does in `savePreset` so the writer and the create path agree.
+ */
+function slugifyName(name: string): string {
+  return name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_|_$/g, "");
-  const yamlPath = join(presetsDirectory, `${safeFilename}.yaml`);
-
-  const yamlDefinition: Record<string, unknown> = {
-    name: definition.name,
-  };
-  if (definition.description) {
-    yamlDefinition.description = definition.description;
-  }
-  if (definition.extends) {
-    yamlDefinition.extends = definition.extends;
-  }
-
-  if (Object.keys(overrides).length > 0) {
-    yamlDefinition.override = overrides;
-  }
-
-  if (definition.remove && definition.remove.length > 0) {
-    yamlDefinition.remove = definition.remove;
-  }
-
-  if (additions.length > 0) {
-    // Write JSON preset for added plugins
-    const presetRelPath = `fx/${safeFilename}.json`;
-    const presetAbsPath = resolve(presetsDirectory, presetRelPath);
-    const presetContent = serializePresetFxChain(additions);
-    writeFileSync(presetAbsPath, presetContent, "utf-8");
-
-    yamlDefinition.fxChainFile = presetRelPath;
-    yamlDefinition.add = addEntries;
-  }
-  // When additions.length === 0, old add/fxChainFile entries are intentionally
-  // dropped — the user released those plugins from this preset level.
-
-  writeFileSync(yamlPath, YAML.stringify(yamlDefinition), "utf-8");
 }

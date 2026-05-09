@@ -40,7 +40,7 @@ export function status(reabasePath: string): StatusResult {
   const snapshotsDirectory = join(reabasePath, "snapshots");
   const projectRoot = resolve(reabasePath, "..");
 
-  const presets = loadPresets(presetsDirectory);
+  const { presets } = loadPresets(presetsDirectory);
   const rppFiles = findRppFiles(projectRoot);
   const tracks: TrackStatus[] = [];
 
@@ -80,7 +80,7 @@ export function status(reabasePath: string): StatusResult {
       // Resolve the current preset
       let resolvedPreset;
       try {
-        resolvedPreset = resolvePreset(preset, presets, presetsDirectory);
+        resolvedPreset = resolvePreset(preset, presets);
       } catch {
         tracks.push({
           trackName,

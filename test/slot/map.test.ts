@@ -204,3 +204,52 @@ describe("resolveSlotIds", () => {
     expect(resolved).toEqual([]);
   });
 });
+
+describe("slot map labels", () => {
+  it("buildSlotMap stores fp.displayName as the entry's label", () => {
+    const chain: FxFingerprint[] = [
+      { ...makeFx("AU: kHs Filter (Kilohearts)", "v1", "khs-filter"), displayName: "Aggressive low-cut" },
+      { ...makeFx("AU: kHs Filter (Kilohearts)", "v2", "khs-filter-2") },
+    ];
+    const map = buildSlotMap(chain);
+    expect(map["khs-filter"].label).toBe("Aggressive low-cut");
+    expect(map["khs-filter-2"].label).toBeUndefined();
+  });
+
+  it("resolveSlotIds surfaces stored labels as fp.displayName", () => {
+    const chain = [makeFx("AU: kHs Filter (Kilohearts)", "v1", "tmp-id")];
+    const slotMap = {
+      "khs-filter": {
+        pluginType: "AU",
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        stateHash: "hash_v1",
+        label: "Aggressive low-cut",
+      },
+    };
+    const resolved = resolveSlotIds(chain, slotMap);
+    expect(resolved[0].slotId).toBe("khs-filter");
+    expect(resolved[0].displayName).toBe("Aggressive low-cut");
+  });
+
+  it("entries without label resolve cleanly without setting displayName", () => {
+    const chain = [makeFx("AU: kHs Filter (Kilohearts)", "v1", "tmp-id")];
+    const slotMap = {
+      "khs-filter": {
+        pluginType: "AU",
+        pluginName: "AU: kHs Filter (Kilohearts)",
+        stateHash: "hash_v1",
+      },
+    };
+    const resolved = resolveSlotIds(chain, slotMap);
+    expect(resolved[0].displayName).toBeUndefined();
+  });
+
+  it("round-trips label through serialize / parse", () => {
+    const chain: FxFingerprint[] = [
+      { ...makeFx("AU: kHs Filter (Kilohearts)", "v1", "khs-filter"), displayName: "Bass cut" },
+    ];
+    const map = buildSlotMap(chain);
+    const parsed = parseSlotMap(serializeSlotMap(map));
+    expect(parsed!["khs-filter"].label).toBe("Bass cut");
+  });
+});

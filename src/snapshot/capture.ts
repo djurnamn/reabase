@@ -6,6 +6,7 @@ import {
   getFxPluginName,
   getFxPluginType,
   getFxStateBlob,
+  getFxBypass,
 } from "../parser/helpers.js";
 import type { FxFingerprint, ParameterValue } from "./types.js";
 import { generateUniqueSlotId } from "../slot/identity.js";
@@ -14,6 +15,10 @@ import { generateUniqueSlotId } from "../slot/identity.js";
  * Capture the current FX chain structure of a track as an ordered list of fingerprints.
  * Returns structural fingerprints with empty parameters and stateHash.
  * Parameters come from Lua via TrackFX_GetParam — use enrichWithParameters() to merge them in.
+ *
+ * Reads each plugin's BYPASS struct: the first numeric param (1 = bypassed,
+ * 0 = active) lands on `fp.bypassed`. Captured fingerprints with
+ * bypassed=true round-trip through apply.
  */
 export function captureFxChain(track: RppNode): FxFingerprint[] {
   const fxChain = getFxChain(track);
@@ -22,7 +27,7 @@ export function captureFxChain(track: RppNode): FxFingerprint[] {
   const plugins = getFxPlugins(fxChain);
   const existingIds = new Set<string>();
 
-  return plugins.map((plugin) => {
+  return plugins.map((plugin, pluginIndex) => {
     const pluginName = getFxPluginName(plugin) ?? "unknown";
     const pluginType = getFxPluginType(plugin);
     const slotId = generateUniqueSlotId(pluginName, existingIds);
@@ -31,6 +36,9 @@ export function captureFxChain(track: RppNode): FxFingerprint[] {
     const pluginParams = plugin.params.length > 1 ? plugin.params.slice(1) : undefined;
     // Capture state blob for full VST/VST3 state restoration
     const blob = getFxStateBlob(plugin);
+    // Read BYPASS state (first param is the bypass flag — 1 = bypassed).
+    const bypassStruct = getFxBypass(fxChain, pluginIndex);
+    const bypassed = !!bypassStruct && Number(bypassStruct.params[0]) === 1;
     return {
       pluginName,
       pluginType,
@@ -39,6 +47,7 @@ export function captureFxChain(track: RppNode): FxFingerprint[] {
       pluginParams,
       parameters: {},
       stateBlob: blob || undefined,
+      ...(bypassed ? { bypassed: true } : {}),
     };
   });
 }

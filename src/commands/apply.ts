@@ -70,7 +70,7 @@ function buildFxChainFromScratch(
     newChildren.push({
       kind: "struct",
       token: "BYPASS",
-      params: [0, 0, 0],
+      params: [fx.bypassed ? 1 : 0, 0, 0],
     });
 
     const pluginNode: RppNode = {

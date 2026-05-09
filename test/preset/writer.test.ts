@@ -1,21 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import YAML from "yaml";
-import { updateChildPreset } from "../../src/preset/writer.js";
-import { resolvePreset } from "../../src/preset/resolver.js";
+import { updatePresetOwnPlugins, updateComposition } from "../../src/preset/writer.js";
 import { loadPresets } from "../../src/preset/loader.js";
-import type { PresetDefinition } from "../../src/preset/types.js";
+import { resolvePreset } from "../../src/preset/resolver.js";
+import type { PresetDefinition, LoadedPreset } from "../../src/preset/types.js";
 import type { FxFingerprint, ParameterValue } from "../../src/snapshot/types.js";
 
 let tempDir: string;
 
 beforeEach(() => {
-  tempDir = join(
-    tmpdir(),
-    `reabase-writer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  );
+  tempDir = join(tmpdir(), `reabase-writer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(tempDir, "fx"), { recursive: true });
 });
 
@@ -23,179 +20,247 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-const params: Record<string, ParameterValue> = {
-  "0": { name: "x", value: 0.5 },
-};
+const params: Record<string, ParameterValue> = { "0": { name: "x", value: 0.5 } };
 
-function makeFp(slotId: string, hash: string = "h"): FxFingerprint {
+function lp(def: PresetDefinition): LoadedPreset {
+  return { ...def, _sourceDir: tempDir, _categorySlug: "" };
+}
+
+function makeFp(slotId: string, displayName?: string): FxFingerprint {
   return {
     pluginName: `AU: ${slotId}`,
     pluginType: "AU",
     pluginParams: ["", "", 0, "", ""],
     slotId,
     parameters: params,
-    stateHash: `hash_${hash}`,
+    stateHash: `hash_${slotId}`,
+    ...(displayName ? { displayName } : {}),
   };
 }
 
-function writeParentPreset(slotIds: string[]): void {
-  const plugins = slotIds.map((id) => ({
-    pluginName: `AU: ${id}`,
-    pluginType: "AU",
-    pluginParams: ["", "", 0, "", ""],
-    slotId: id,
-    parameters: params,
-  }));
-  writeFileSync(
-    join(tempDir, "fx/parent.json"),
-    JSON.stringify(plugins),
-    "utf-8"
-  );
-  writeFileSync(
-    join(tempDir, "parent.yaml"),
-    YAML.stringify({
-      name: "parent",
-      fxChainFile: "fx/parent.json",
-      plugins: slotIds.map((id) => ({ id })),
-    }),
-    "utf-8"
-  );
-}
-
-describe("updateChildPreset", () => {
-  it("emits `before:` when an owned plugin sits ahead of all parent slots", () => {
-    writeParentPreset(["parent_a"]);
-
-    const childDefinition: PresetDefinition = {
-      name: "child",
-      extends: "parent",
-    };
-    const parentChain: FxFingerprint[] = [makeFp("parent_a")];
-    // Track chain: child plugin appears BEFORE the parent slot.
-    const fullChain: FxFingerprint[] = [makeFp("child_x"), makeFp("parent_a")];
-
-    updateChildPreset(tempDir, childDefinition, parentChain, fullChain, [
-      "child_x",
-    ]);
-
-    const yaml = YAML.parse(
-      readFileSync(join(tempDir, "child.yaml"), "utf-8")
+describe("updatePresetOwnPlugins", () => {
+  it("writes a fresh plain preset's plugins + fxChainFile", () => {
+    updatePresetOwnPlugins(
+      lp({ name: "voice" }),
+      [makeFp("khs-compressor"), makeFp("khs-limiter")]
     );
-    expect(yaml.add).toEqual([{ id: "child_x", before: "parent_a" }]);
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "voice.yaml"), "utf-8"));
+    expect(yaml.name).toBe("voice");
+    expect(yaml.fxChainFile).toBe("fx/voice.json");
+    expect(yaml.plugins).toEqual([{ id: "khs-compressor" }, { id: "khs-limiter" }]);
+    expect(existsSync(join(tempDir, "fx/voice.json"))).toBe(true);
   });
 
-  it("emits `after:` when an owned plugin follows a parent slot", () => {
-    writeParentPreset(["parent_a"]);
-
-    const childDefinition: PresetDefinition = {
-      name: "child",
-      extends: "parent",
-    };
-    const parentChain: FxFingerprint[] = [makeFp("parent_a")];
-    const fullChain: FxFingerprint[] = [makeFp("parent_a"), makeFp("child_x")];
-
-    updateChildPreset(tempDir, childDefinition, parentChain, fullChain, [
-      "child_x",
-    ]);
-
-    const yaml = YAML.parse(
-      readFileSync(join(tempDir, "child.yaml"), "utf-8")
-    );
-    expect(yaml.add).toEqual([{ id: "child_x", after: "parent_a" }]);
-  });
-
-  it("anchors sibling additions to each other when clustered", () => {
-    writeParentPreset(["parent_a"]);
-
-    const parentChain: FxFingerprint[] = [makeFp("parent_a")];
-    // Two child plugins both before the parent slot.
-    const fullChain: FxFingerprint[] = [
-      makeFp("child_x"),
-      makeFp("child_y"),
-      makeFp("parent_a"),
-    ];
-
-    updateChildPreset(
-      tempDir,
-      { name: "child", extends: "parent" },
-      parentChain,
-      fullChain,
-      ["child_x", "child_y"]
+  it("propagates displayName onto plugins[].label", () => {
+    updatePresetOwnPlugins(
+      lp({ name: "voice" }),
+      [makeFp("khs-filter", "Aggressive low-cut"), makeFp("khs-filter-2", "High shelf boost")]
     );
 
-    const yaml = YAML.parse(
-      readFileSync(join(tempDir, "child.yaml"), "utf-8")
-    );
-    expect(yaml.add).toEqual([
-      { id: "child_x", before: "parent_a" },
-      { id: "child_y", after: "child_x" },
+    const yaml = YAML.parse(readFileSync(join(tempDir, "voice.yaml"), "utf-8"));
+    expect(yaml.plugins).toEqual([
+      { id: "khs-filter", label: "Aggressive low-cut" },
+      { id: "khs-filter-2", label: "High shelf boost" },
     ]);
   });
 
-  it("round-trips: writer output replayed by resolver reproduces the original chain", () => {
-    // Parent: [parent_a, parent_b]
-    // Track: [child_x, parent_a, child_y, parent_b, child_z]
-    // Three children: one before any parent, one between, one at the end.
-    writeParentPreset(["parent_a", "parent_b"]);
-
-    // Child preset's fxChainFile must exist for the resolver to load
-    // additions from. We pre-create it; updateChildPreset would normally
-    // overwrite it.
+  it("preserves composition fields when rewriting an existing composed preset", () => {
     writeFileSync(
-      join(tempDir, "fx/child.json"),
+      join(tempDir, "voice_character_female.yaml"),
+      YAML.stringify({
+        name: "voice.character.female",
+        description: "voice + character + female",
+        imports: ["voice", "role.character", "gender.female"],
+        order: ["voice/khs-compressor", "voice.character.female/khs-tilt"],
+        deactivated: ["role.character/totape9"],
+        excluded: ["gender.female/t-de-esser-2"],
+      }),
+      "utf-8"
+    );
+
+    updatePresetOwnPlugins(
+      lp({
+        name: "voice.character.female",
+        imports: ["voice", "role.character", "gender.female"],
+      }),
+      [makeFp("khs-tilt", "Subtle tilt")]
+    );
+
+    const yaml = YAML.parse(
+      readFileSync(join(tempDir, "voice_character_female.yaml"), "utf-8")
+    );
+    expect(yaml.imports).toEqual(["voice", "role.character", "gender.female"]);
+    expect(yaml.order).toEqual([
+      "voice/khs-compressor",
+      "voice.character.female/khs-tilt",
+    ]);
+    expect(yaml.deactivated).toEqual(["role.character/totape9"]);
+    expect(yaml.excluded).toEqual(["gender.female/t-de-esser-2"]);
+    expect(yaml.description).toBe("voice + character + female");
+    expect(yaml.plugins).toEqual([{ id: "khs-tilt", label: "Subtle tilt" }]);
+    expect(yaml.fxChainFile).toBe("fx/voice_character_female.json");
+  });
+
+  it("drops fxChainFile + plugins when ownedFingerprints is empty", () => {
+    writeFileSync(
+      join(tempDir, "voice.yaml"),
+      YAML.stringify({
+        name: "voice",
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "khs-compressor" }],
+        imports: ["base"],
+      }),
+      "utf-8"
+    );
+
+    updatePresetOwnPlugins(
+      lp({
+        name: "voice",
+        imports: ["base"],
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "khs-compressor" }],
+      }),
+      []
+    );
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "voice.yaml"), "utf-8"));
+    expect(yaml.plugins).toBeUndefined();
+    expect(yaml.fxChainFile).toBeUndefined();
+    expect(yaml.imports).toEqual(["base"]);
+  });
+
+  it("round-trips through loader+resolver", () => {
+    updatePresetOwnPlugins(
+      lp({ name: "voice" }),
+      [
+        makeFp("khs-compressor", "Comp"),
+        makeFp("khs-limiter"),
+      ]
+    );
+
+    const { presets } = loadPresets(tempDir);
+    const resolved = resolvePreset("voice", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-compressor",
+      "khs-limiter",
+    ]);
+    expect(resolved.fxChain[0].displayName).toBe("Comp");
+    expect(resolved.fxChain[1].displayName).toBeUndefined();
+  });
+});
+
+describe("updateComposition", () => {
+  function setupPlainPresets(): void {
+    writeFileSync(
+      join(tempDir, "voice.yaml"),
+      YAML.stringify({
+        name: "voice",
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "khs-compressor" }],
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, "fx/voice.json"),
       JSON.stringify([
         {
-          pluginName: "AU: child_x",
+          pluginName: "AU: kHs Compressor (Kilohearts)",
           pluginType: "AU",
           pluginParams: ["", "", 0, "", ""],
-          slotId: "child_x",
-          parameters: params,
-        },
-        {
-          pluginName: "AU: child_y",
-          pluginType: "AU",
-          pluginParams: ["", "", 0, "", ""],
-          slotId: "child_y",
-          parameters: params,
-        },
-        {
-          pluginName: "AU: child_z",
-          pluginType: "AU",
-          pluginParams: ["", "", 0, "", ""],
-          slotId: "child_z",
+          slotId: "khs-compressor",
           parameters: params,
         },
       ]),
       "utf-8"
     );
-
-    const parentChain: FxFingerprint[] = [makeFp("parent_a"), makeFp("parent_b")];
-    const fullChain: FxFingerprint[] = [
-      makeFp("child_x"),
-      makeFp("parent_a"),
-      makeFp("child_y"),
-      makeFp("parent_b"),
-      makeFp("child_z"),
-    ];
-
-    updateChildPreset(
-      tempDir,
-      { name: "child", extends: "parent" },
-      parentChain,
-      fullChain,
-      ["child_x", "child_y", "child_z"]
+    writeFileSync(
+      join(tempDir, "extra.yaml"),
+      YAML.stringify({
+        name: "extra",
+        fxChainFile: "fx/extra.json",
+        plugins: [{ id: "khs-limiter" }],
+      }),
+      "utf-8"
     );
+    writeFileSync(
+      join(tempDir, "fx/extra.json"),
+      JSON.stringify([
+        {
+          pluginName: "AU: kHs Limiter (Kilohearts)",
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: "khs-limiter",
+          parameters: params,
+        },
+      ]),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, "composed.yaml"),
+      YAML.stringify({
+        name: "composed",
+        imports: ["voice"],
+      }),
+      "utf-8"
+    );
+  }
 
-    // Re-load presets from the YAML the writer just produced and resolve.
-    const presets = loadPresets(tempDir);
-    const resolved = resolvePreset("child", presets, tempDir);
+  it("adds an import to a composed preset", () => {
+    setupPlainPresets();
+    const { presets } = loadPresets(tempDir);
 
-    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
-      "child_x",
-      "parent_a",
-      "child_y",
-      "parent_b",
-      "child_z",
-    ]);
+    updateComposition(presets.get("composed")!, { imports: ["voice", "extra"] });
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "composed.yaml"), "utf-8"));
+    expect(yaml.imports).toEqual(["voice", "extra"]);
+  });
+
+  it("sets order, deactivated, and excluded in one shot", () => {
+    setupPlainPresets();
+    const { presets } = loadPresets(tempDir);
+
+    updateComposition(presets.get("composed")!, {
+      order: ["voice/khs-compressor"],
+      deactivated: ["voice/khs-compressor"],
+      excluded: [],
+    });
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "composed.yaml"), "utf-8"));
+    expect(yaml.order).toEqual(["voice/khs-compressor"]);
+    expect(yaml.deactivated).toEqual(["voice/khs-compressor"]);
+    expect(yaml.excluded).toBeUndefined();
+  });
+
+  it("leaves untouched fields alone when undefined is passed", () => {
+    setupPlainPresets();
+    const first = loadPresets(tempDir).presets;
+
+    updateComposition(first.get("composed")!, {
+      imports: ["voice", "extra"],
+      excluded: ["voice/khs-compressor"],
+    });
+
+    // Reload after the first edit so the second call sees the updated YAML.
+    const second = loadPresets(tempDir).presets;
+    updateComposition(second.get("composed")!, { excluded: [] });
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "composed.yaml"), "utf-8"));
+    expect(yaml.imports).toEqual(["voice", "extra"]);
+    expect(yaml.excluded).toBeUndefined();
+  });
+
+  it("throws when invoked with a definition whose YAML went missing", () => {
+    setupPlainPresets();
+    const { presets } = loadPresets(tempDir);
+    const composed = presets.get("composed")!;
+
+    // Simulate the YAML disappearing between load and update — surfaces as
+    // a clear error rather than silently re-creating the file.
+    rmSync(join(tempDir, "composed.yaml"));
+
+    expect(() =>
+      updateComposition(composed, { imports: ["voice"] })
+    ).toThrow(/Preset 'composed' not found/);
   });
 });
