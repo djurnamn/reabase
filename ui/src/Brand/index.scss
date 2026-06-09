@@ -1,0 +1,29 @@
+@use "styles/color" as color;
+
+// `rea` uses the djui accent token intentionally — the REAPER brand color
+// lands with the shared REAPER theme (the accent will resolve to it then).
+.Brand {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+
+  &__wordmark {
+    font-size: 1rem;
+    letter-spacing: 0.01em;
+  }
+
+  // No weight difference between the two parts — only color distinguishes them.
+  &__rea {
+    color: color.get(accent, primary);
+  }
+
+  &__base {
+    color: color.get(foreground, primary);
+  }
+
+  &__version {
+    margin-top: 0.15rem;
+    font-size: 0.55rem;
+    color: color.get(foreground, primary, 0.45);
+  }
+}

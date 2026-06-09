@@ -1,0 +1,44 @@
+@use "styles/color" as color;
+
+.StatusPill {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+
+  // Neutral default — djui has no "context-neutral" token yet (see the djui
+  // gaps handoff); used for no-preset / unknown.
+  color: color.get(foreground, primary);
+  background-color: color.get(foreground, primary, 0.18);
+
+  // Colored statuses map to djui context colors (no hardcoded hex). Text uses
+  // the foreground-contrast token for legibility on the solid fill.
+  &--up-to-date,
+  &--modified,
+  &--no-snapshot,
+  &--upstream-changes,
+  &--conflict,
+  &--unresolvable-preset {
+    color: color.get(foreground, contrast);
+  }
+
+  &--up-to-date {
+    background-color: color.get(context, positive);
+  }
+
+  &--modified,
+  &--no-snapshot {
+    background-color: color.get(context, warning);
+  }
+
+  &--upstream-changes {
+    background-color: color.get(context, info);
+  }
+
+  &--conflict,
+  &--unresolvable-preset {
+    background-color: color.get(context, negative);
+  }
+}

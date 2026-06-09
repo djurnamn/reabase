@@ -1,0 +1,41 @@
+<!doctype html>
+<html data-djui-mode="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>reabase</title>
+  </head>
+  <body>
+    <div id="root">
+      <noscript>JavaScript is disabled.</noscript>
+      <!-- Diagnostic placeholder. React clears #root on mount; if it doesn't,
+           these markers pinpoint where the load stalled (WKWebView fails
+           file:// loads silently). -->
+      <div style="padding: 1.5rem; font-family: -apple-system, sans-serif; color: #ccc; background: #1a1a1a; min-height: 100vh; box-sizing: border-box;">
+        <h1 style="margin: 0 0 0.5rem; font-size: 1rem;">reabase</h1>
+        <p style="margin: 0; opacity: 0.7;" id="boot-stage">Loading… (HTML parsed)</p>
+        <pre id="boot-error" style="display: none; color: #ff8a8a; white-space: pre-wrap; word-break: break-all; margin-top: 1rem; padding: 0.75rem; background: #2a1a1a; border-radius: 0.25rem; font-size: 0.75rem;"></pre>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var stage = document.getElementById("boot-stage");
+        if (stage) stage.textContent = "Loading… (inline script ran)";
+        var errBox = document.getElementById("boot-error");
+        function showError(label, err) {
+          if (!errBox) return;
+          errBox.style.display = "block";
+          var msg = err && err.stack ? err.stack : err && err.message ? err.message : String(err);
+          errBox.textContent = "[" + label + "] " + msg;
+        }
+        window.addEventListener("error", function (e) {
+          showError("error", e.error || e.message || "(unknown)");
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          showError("unhandledrejection", e.reason);
+        });
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

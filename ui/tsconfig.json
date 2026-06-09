@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "djui": ["../../djui/packages/core/src/index.ts"],
+      "djui/styles/*": ["../../djui/packages/core/src/styles/*"],
+      "@djui/reaper-webview": ["../../djui/packages/reaper-webview/src/index.ts"],
+      "@djui/lucide": ["../../djui/packages/lucide/src/index.tsx"],
+      "@djui/sonner": ["../../djui/packages/sonner/src/index.tsx"],
+      "@djui/use-form-definition": ["../../djui/packages/use-form-definition/src/index.ts"],
+      "@reaper-webview/react": ["../../reaper-webview-dev/packages/react/src/index.ts"],
+      "@reaper-webview/client": ["../../reaper-webview-dev/packages/client/src/index.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

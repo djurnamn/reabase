@@ -1,0 +1,124 @@
+@use "styles/color" as color;
+
+.App {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  color: color.get(foreground, primary);
+  background-color: color.get(surface, 1);
+
+  // ─── Fixed header ───
+  // No padding: the bar's areas run edge to edge. A thin surface-1 gap
+  // separates the bar from the preset row.
+  &__header {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.0625rem;
+  }
+
+  // Box-layout bar: surface-1 shows through the 0.0625rem gaps between the
+  // surface-2 areas. No radius/shadow (a seamless, edge-to-edge variant of
+  // djui's box pattern — noted as a djui gap).
+  &__bar {
+    display: flex;
+    align-items: stretch;
+    gap: 0.0625rem;
+    background-color: color.get(surface, 1);
+  }
+
+  &__area {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background-color: color.get(surface, 2);
+
+    &--brand {
+      flex-shrink: 0;
+    }
+
+    &--track {
+      flex: 1;
+      min-width: 0;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+  }
+
+  &__track-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: color.get(foreground, primary, 0.75);
+  }
+
+  // Menu: just an icon filling its area up to the gaps. No radius; current
+  // surface, lighter on hover.
+  &__menu {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.75rem;
+    border: none;
+    border-radius: 0;
+    color: inherit;
+    cursor: pointer;
+    background-color: color.get(surface, 2);
+
+    &:hover {
+      background-color: color.get(surface, 3);
+    }
+  }
+
+  // Preset row: part of the fixed header → surface-2 (matches the bar areas
+  // and the tab strip below it, with no separator between them). The only
+  // separator is the surface-1 header gap above this row. djui form inputs
+  // default to 1.5rem — too tall here; pin to 1rem locally (a REAPER-theme
+  // default to fix globally later).
+  &__preset-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background-color: color.get(surface, 2);
+    --djui-form-input-size: 1rem;
+  }
+
+  &__preset-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  // ─── Scrollable body ───
+  // Anchored at surface-2 in the markup (data-djui-set-surface="2"), so the
+  // folder tabs' own surfaceDirection="previous" yields a surface-2 strip over
+  // a surface-1 panel — no color overrides here.
+  &__body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    background-color: color.get(surface, 1);
+  }
+
+  // Layout only: make djui's folder Tabs fill the body and let just the panel
+  // scroll, with the strip pinned. (Surfaces + padding come from djui.) Bridges
+  // until djui exposes the strip/panel separately — see the djui gaps handoff.
+  .DjuiTabs {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+
+  .DjuiTabs__header {
+    flex-shrink: 0;
+  }
+
+  .DjuiTabs__content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+}
