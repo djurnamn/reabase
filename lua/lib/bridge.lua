@@ -157,6 +157,40 @@ function bridge.apply_chunk(track_chunk, resolved_chain)
   return result, nil
 end
 
+--- Pull upstream changes for a single source of a composed preset onto the
+--- track, leaving the other sources untouched. Returns the modified chunk +
+--- parameter maps to apply (mirrors apply_chunk), plus `pulledSlots` (feed
+--- these to bridge.snapshot's rebaseline_slots) and `conflicts` (slots left
+--- local because pulling would clobber a conflicting edit).
+---@param track_chunk string The full track chunk
+---@param source string The source name (container's own name or an import)
+---@param reabase_path string|nil Optional path to search from
+---@param fx_parameters table[]|nil Parameter maps from capture_fx_parameters
+---@return table|nil result {modifiedChunk, parameterMaps, pulledSlots, conflicts}
+---@return string|nil error
+function bridge.pull_source(track_chunk, source, reabase_path, fx_parameters)
+  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
+  local input = json.encode({
+    trackChunk = track_chunk,
+    source = source,
+    fxParameters = fx_parameters,
+  })
+
+  local output, code = run_cli("pull-source" .. path_arg, input)
+  if not output or output == "" then
+    return nil, "Failed to run reabase pull-source"
+  end
+
+  local ok, result = pcall(json.decode, output)
+  if not ok then
+    return nil, "Failed to parse pull-source JSON: " .. tostring(result)
+  end
+  if result.error then
+    return nil, result.error
+  end
+  return result, nil
+end
+
 --- Set a preset on a track chunk.
 ---@param track_chunk string The full track chunk
 ---@param preset string The preset to assign
@@ -186,9 +220,12 @@ end
 ---@param preset string The assigned preset
 ---@param reabase_path string|nil Optional path to search from
 ---@param fx_parameters table[]|nil Parameter maps from capture_fx_parameters
+---@param preserve_local_slot_ids boolean|nil Keep auto-generated slotIds ("Keep both")
+---@param rebaseline_slots string[]|nil Scoped re-baseline: only these slotIds are
+---       re-baselined; other slots keep their existing snapshot entry (per-source pull)
 ---@return string|nil modified_chunk The modified track chunk (with slot map in P_EXT)
 ---@return string|nil error
-function bridge.snapshot(track_chunk, preset, reabase_path, fx_parameters, preserve_local_slot_ids)
+function bridge.snapshot(track_chunk, preset, reabase_path, fx_parameters, preserve_local_slot_ids, rebaseline_slots)
   local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
   local payload = {
     trackChunk = track_chunk,
@@ -197,6 +234,11 @@ function bridge.snapshot(track_chunk, preset, reabase_path, fx_parameters, prese
   }
   if preserve_local_slot_ids then
     payload.preserveLocalSlotIds = true
+  end
+  -- Scoped re-baseline for a per-source pull: only these slotIds are
+  -- re-baselined; the rest of the snapshot is preserved (see bridge.pull_source).
+  if rebaseline_slots then
+    payload.rebaselineSlots = rebaseline_slots
   end
   local input = json.encode(payload)
 
@@ -344,66 +386,9 @@ function bridge.revert_plugin(track_chunk, slot_id, reabase_path)
   return result, nil
 end
 
---- Unlink a child preset override, turning it into a separate addition.
----@param track_chunk string The full track chunk
----@param slot_id string The slot ID to unlink
----@param reabase_path string|nil Optional path to search from
----@param fx_parameters table[]|nil Parameter maps from capture_fx_parameters
----@return table|nil result {success, newSlotId, modifiedChunk}
----@return string|nil error
-function bridge.unlink_override(track_chunk, slot_id, reabase_path, fx_parameters)
-  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
-  local input = json.encode({
-    trackChunk = track_chunk,
-    slotId = slot_id,
-    fxParameters = fx_parameters,
-  })
-
-  local output, code = run_cli("unlink-override" .. path_arg, input)
-  if not output or output == "" then
-    return nil, "Failed to run reabase unlink-override"
-  end
-
-  local ok, result = pcall(json.decode, output)
-  if not ok then
-    return nil, "Failed to parse unlink-override JSON: " .. tostring(result)
-  end
-  if result.error then
-    return nil, result.error
-  end
-  return result, nil
-end
-
---- Link a child addition as an override of a parent slot.
----@param track_chunk string The full track chunk
----@param child_slot_id string The child plugin's slot ID
----@param parent_slot_id string The parent plugin's slot ID to override
----@param reabase_path string|nil Optional path to search from
----@param fx_parameters table[]|nil Parameter maps from capture_fx_parameters
----@return table|nil result {success, modifiedChunk, parameterMaps}
----@return string|nil error
-function bridge.link_as_override(track_chunk, child_slot_id, parent_slot_id, reabase_path, fx_parameters)
-  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
-  local input = json.encode({
-    trackChunk = track_chunk,
-    childSlotId = child_slot_id,
-    parentSlotId = parent_slot_id,
-    fxParameters = fx_parameters,
-  })
-
-  local output, code = run_cli("link-as-override" .. path_arg, input)
-  if not output or output == "" then
-    return nil, "Failed to run reabase link-as-override"
-  end
-
-  local ok, result = pcall(json.decode, output)
-  if not ok then
-    return nil, "Failed to parse link-as-override JSON: " .. tostring(result)
-  end
-  if result.error then
-    return nil, result.error
-  end
-  return result, nil
-end
+-- NOTE: bridge.unlink_override / bridge.link_as_override were removed — the
+-- override model is retired (the loader now rejects `override`/`extends`/etc.
+-- and the CLI no longer implements link/unlink-override). Composition handles
+-- this via sorting/exclude/remove instead.
 
 return bridge

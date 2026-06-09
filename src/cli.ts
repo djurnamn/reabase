@@ -5,11 +5,11 @@ import { init } from "./commands/init.js";
 import { status } from "./commands/status.js";
 import { compute } from "./commands/compute.js";
 import { planSync, executeSync } from "./commands/sync.js";
-import { inspectTrack, applyChunk, setPreset, snapshotTrack, savePreset, deletePreset, revertPlugin, updatePresets, updateCompositionBridge, renameSlot } from "./commands/bridge.js";
+import { inspectTrack, applyChunk, setPreset, snapshotTrack, savePreset, deletePreset, revertPlugin, updatePresets, updateCompositionBridge, renameSlot, pullSource } from "./commands/bridge.js";
 import { loadPresets } from "./preset/loader.js";
 import { findReabaseRoot } from "./utilities/discovery.js";
 import type { ComputeInput } from "./commands/compute.js";
-import type { ApplyChunkInput, SetPresetInput, SnapshotInput, SavePresetInput, DeletePresetInput, RevertPluginInput, UpdatePresetsInput, UpdateCompositionInput, RenameSlotInput } from "./commands/bridge.js";
+import type { ApplyChunkInput, SetPresetInput, SnapshotInput, SavePresetInput, DeletePresetInput, RevertPluginInput, UpdatePresetsInput, UpdateCompositionInput, RenameSlotInput, PullSourceInput } from "./commands/bridge.js";
 
 const program = new Command()
   .name("reabase")
@@ -492,6 +492,34 @@ program
       const inputJson = await readStdin();
       const input: RenameSlotInput = JSON.parse(inputJson);
       const result = renameSlot(input);
+      console.log(JSON.stringify(result));
+    } catch (error) {
+      console.error(
+        JSON.stringify({ error: (error as Error).message })
+      );
+      process.exit(2);
+    }
+  });
+
+// ─── pull-source ─────────────────────────────────────────────────
+
+program
+  .command("pull-source")
+  .description("Pull upstream changes for a single source onto a track (reads JSON from stdin, writes JSON to stdout)")
+  .option("-p, --path <path>", "path to search from", ".")
+  .action(async (options: { path: string }) => {
+    const reabasePath = findReabaseRoot(options.path);
+    if (!reabasePath) {
+      console.error(
+        JSON.stringify({ error: "No .reabase/ directory found" })
+      );
+      process.exit(1);
+    }
+
+    try {
+      const inputJson = await readStdin();
+      const input: PullSourceInput = JSON.parse(inputJson);
+      const result = pullSource(input, reabasePath);
       console.log(JSON.stringify(result));
     } catch (error) {
       console.error(

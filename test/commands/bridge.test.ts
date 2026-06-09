@@ -1,13 +1,11 @@
-// All tests in this file are skipped during phase 2 of the composition
-// rollout. They test the retired single-inheritance bridge surface
-// (extends/override/add/remove + unlinkOverride/linkAsOverride). Phase 3
-// rewrites bridge.ts on top of the composition resolver and replaces these
-// tests with the equivalent behaviors under the new schema.
+// Integration tests for the bridge command surface against the composition
+// schema. (The retired single-inheritance tests — extends/override/add and
+// unlinkOverride/linkAsOverride — were removed when that model was dropped.)
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets, unlinkOverride, linkAsOverride } from "../../src/commands/bridge.js";
+import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets } from "../../src/commands/bridge.js";
 import { resolve } from "node:path";
 
 const FIXTURES = resolve(import.meta.dirname, "../fixtures");
@@ -30,18 +28,17 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-/** Write a preset YAML and its JSON preset file */
+/** Write a plain preset YAML and its JSON preset file */
 function writePreset(
   name: string,
   jsonContent: object[],
-  options?: { extends?: string; description?: string }
+  options?: { description?: string }
 ): void {
   writeFileSync(
     join(reabasePath, "presets", `${name}.yaml`),
     [
       `name: ${name}`,
       options?.description ? `description: ${options.description}` : null,
-      options?.extends ? `extends: ${options.extends}` : null,
       `fxChainFile: fx/${name}.json`,
     ]
       .filter(Boolean)
@@ -100,7 +97,7 @@ const TRACK_CHUNK_WITH_ROLE = `<TRACK {66595AAC-8084-8049-8F26-93FAE19A27C6}
   >
 >`;
 
-describe.skip("inspectTrack", () => {
+describe("inspectTrack", () => {
   it("reports no-preset when track has no preset assigned", () => {
     const result = inspectTrack(TRACK_CHUNK_NO_ROLE, reabasePath);
     expect(result.trackName).toBe("BJÖRN");
@@ -433,7 +430,7 @@ describe.skip("inspectTrack", () => {
     expect(existsSync(dupSnapshotPath)).toBe(true);
   });
 
-  it("includes inheritanceChain and resolvedChain when preset is assigned", () => {
+  it("includes sources and resolvedChain when preset is assigned", () => {
     const presetPlugins = [
       {
         pluginName: "AU: T-De-Esser 2 (Techivation)",
@@ -446,23 +443,23 @@ describe.skip("inspectTrack", () => {
     writePreset("player_voice", presetPlugins);
 
     const result = inspectTrack(TRACK_CHUNK_WITH_ROLE, reabasePath);
-    expect(result.inheritanceChain).toEqual(["player_voice"]);
+    expect(result.sources).toEqual(["player_voice"]);
     expect(result.resolvedChain).not.toBeNull();
     expect(result.resolvedChain!).toHaveLength(1);
     expect(result.resolvedChain![0].pluginName).toBe("AU: T-De-Esser 2 (Techivation)");
     expect(result.resolvedChain![0].origin).toBe("player_voice");
   });
 
-  it("returns empty inheritanceChain and null resolvedChain for no-preset", () => {
+  it("returns empty sources and null resolvedChain for no-preset", () => {
     const result = inspectTrack(TRACK_CHUNK_NO_ROLE, reabasePath);
-    expect(result.inheritanceChain).toEqual([]);
+    expect(result.sources).toEqual([]);
     expect(result.resolvedChain).toBeNull();
   });
 
-  it("returns empty inheritanceChain and null resolvedChain for unresolvable preset", () => {
+  it("returns empty sources and null resolvedChain for unresolvable preset", () => {
     const result = inspectTrack(TRACK_CHUNK_WITH_ROLE, reabasePath);
     expect(result.status).toBe("unresolvable-preset");
-    expect(result.inheritanceChain).toEqual([]);
+    expect(result.sources).toEqual([]);
     expect(result.resolvedChain).toBeNull();
   });
 
@@ -673,7 +670,7 @@ describe.skip("inspectTrack", () => {
   });
 });
 
-describe.skip("applyChunk", () => {
+describe("applyChunk", () => {
   it("applies a resolved FX chain to a track chunk", () => {
     const resolvedChain = [
       {
@@ -721,7 +718,7 @@ describe.skip("applyChunk", () => {
   });
 });
 
-describe.skip("setPreset", () => {
+describe("setPreset", () => {
   it("sets preset on a track without existing preset", () => {
     const result = setPreset({
       trackChunk: TRACK_CHUNK_NO_ROLE,
@@ -743,7 +740,7 @@ describe.skip("setPreset", () => {
   });
 });
 
-describe.skip("savePreset", () => {
+describe("savePreset", () => {
   it("saves entire FX chain when no selectedPlugins", () => {
     const result = savePreset(
       { trackChunk: TRACK_CHUNK_WITH_ROLE, presetName: "full_chain" },
@@ -781,62 +778,6 @@ describe.skip("savePreset", () => {
     expect(parsed[0].pluginName).toContain("T-De-Esser 2");
   });
 
-  it("saves with extendsPreset in YAML", () => {
-    // First create a parent preset
-    writePreset("parent_voice", [
-      {
-        pluginName: "AU: T-De-Esser 2 (Techivation)",
-        pluginType: "AU",
-        slotId: "t-de-esser-2",
-        parameters: {},
-      },
-    ]);
-
-    const result = savePreset(
-      {
-        trackChunk: TRACK_CHUNK_WITH_ROLE,
-        presetName: "child_voice",
-        selectedPlugins: [0],
-        extendsPreset: "parent_voice",
-      },
-      reabasePath
-    );
-
-    expect(result.success).toBe(true);
-
-    const yaml = readFileSync(join(reabasePath, "presets", "child_voice.yaml"), "utf-8");
-    expect(yaml).toContain("extends: parent_voice");
-    expect(yaml).toContain("fxChainFile:");
-  });
-
-  it("saves pure extends (no additions) when selectedPlugins is empty", () => {
-    writePreset("parent_voice", [
-      {
-        pluginName: "AU: T-De-Esser 2 (Techivation)",
-        pluginType: "AU",
-        slotId: "t-de-esser-2",
-        parameters: {},
-      },
-    ]);
-
-    const result = savePreset(
-      {
-        trackChunk: TRACK_CHUNK_WITH_ROLE,
-        presetName: "pure_child",
-        selectedPlugins: [],
-        extendsPreset: "parent_voice",
-      },
-      reabasePath
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.fxChainFile).toBeUndefined();
-
-    const yaml = readFileSync(join(reabasePath, "presets", "pure_child.yaml"), "utf-8");
-    expect(yaml).toContain("extends: parent_voice");
-    expect(yaml).not.toContain("fxChainFile");
-  });
-
   it("returns exists:true when preset with same slug already exists", () => {
     // Save once
     savePreset(
@@ -870,7 +811,7 @@ describe.skip("savePreset", () => {
   });
 });
 
-describe.skip("deletePreset", () => {
+describe("deletePreset", () => {
   it("deletes an existing preset", () => {
     savePreset(
       { trackChunk: TRACK_CHUNK_WITH_ROLE, presetName: "to_delete" },
@@ -894,7 +835,7 @@ describe.skip("deletePreset", () => {
   });
 });
 
-describe.skip("roundtrip: save → assign → snapshot → inspect", () => {
+describe("roundtrip: save → assign → snapshot → inspect", () => {
   it("chunk survives serialize → parse roundtrip", () => {
     // setPreset serializes and the result should be re-parseable
     const { modifiedChunk } = setPreset({
@@ -1083,7 +1024,7 @@ describe.skip("roundtrip: save → assign → snapshot → inspect", () => {
   });
 });
 
-describe.skip("roundtrip: two-track sync flow", () => {
+describe("roundtrip: two-track sync flow", () => {
   it("propagates upstream preset changes from track A to track B via updatePresets", () => {
     // Two tracks with different GUIDs, both carrying the same AU plugin
     const TRACK_A_CHUNK = `<TRACK {11111111-AAAA-BBBB-CCCC-111111111111}
@@ -1223,7 +1164,7 @@ describe.skip("roundtrip: two-track sync flow", () => {
   });
 });
 
-describe.skip("revertPlugin", () => {
+describe("revertPlugin", () => {
   it("reverts a modified plugin back to preset state", () => {
     const presetPlugins = [
       {
@@ -1289,7 +1230,7 @@ describe.skip("revertPlugin", () => {
   });
 });
 
-describe.skip("updatePresets", () => {
+describe("updatePresets", () => {
   it("updates a root preset with current track state", () => {
     const presetPlugins = [
       {
@@ -1329,265 +1270,5 @@ describe.skip("updatePresets", () => {
     const yaml = readFileSync(join(reabasePath, "presets", "player_voice.yaml"), "utf-8");
     expect(yaml).toContain("name: player_voice");
     expect(yaml).toContain("plugins:");
-  });
-});
-
-describe.skip("unlinkOverride", () => {
-  const params1 = { "0": { name: "drive", value: 0.3 } };
-  const params2 = { "0": { name: "drive", value: 0.8 } };
-
-  function setupParentChildWithOverride() {
-    // Parent preset: one Bitcrush plugin
-    writeFileSync(
-      join(reabasePath, "presets", "parent.yaml"),
-      "name: parent\nfxChainFile: fx/parent.json\nplugins:\n  - id: bitcrush\n",
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "parent.json"),
-      JSON.stringify([{
-        pluginName: "AU: kHs Bitcrush (Kilohearts)",
-        pluginType: "AU",
-        slotId: "bitcrush",
-        parameters: params1,
-      }], null, 2),
-      "utf-8"
-    );
-
-    // Child preset: overrides parent's bitcrush slot with different params
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "child_bitcrush.json"),
-      JSON.stringify(params2, null, 2),
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "child.yaml"),
-      "name: child\nextends: parent\noverride:\n  bitcrush:\n    stateFile: fx/child_bitcrush.json\n",
-      "utf-8"
-    );
-  }
-
-  it("converts an override into a separate addition", () => {
-    setupParentChildWithOverride();
-
-    // Create a track with the child preset assigned and a slot map
-    const TRACK = `<TRACK {CCCCCCCC-DDDD-EEEE-FFFF-111111111111}
-  NAME TEST
-  PEAKCOL 17236731
-  BEAT -1
-  AUTOMODE 0
-  VOLPAN 1 0 -1 -1 1
-  MUTESOLO 0 0 0
-  ISBUS 0 0
-  NCHAN 6
-  FX 1
-  TRACKID {CCCCCCCC-DDDD-EEEE-FFFF-111111111111}
-  MAINSEND 1 0
-  <FXCHAIN
-    SHOW 0
-    LASTSEL -1
-    DOCKED 0
-    BYPASS 0 0 0
-    <AU "AU: kHs Bitcrush (Kilohearts)" "" "" 0 "" ""
-      AAAA==
-    >
-    FLOATPOS 0 0 0 0
-    FXID {07EC70AF-D570-084D-ABA9-825C6F0C365C}
-    WAK 0 0
-  >
-  <EXT
-    reabase_preset child
-  >
->`;
-
-    // First snapshot to establish slot map
-    const snap = snapshotTrack(
-      { trackChunk: TRACK, preset: "child", fxParameters: [params2] },
-      reabasePath
-    );
-
-    const result = unlinkOverride(
-      { trackChunk: snap.modifiedChunk, slotId: "bitcrush", fxParameters: [params2] },
-      reabasePath
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.newSlotId).not.toBe("bitcrush");
-    expect(result.modifiedChunk).toContain("<TRACK");
-
-    // Child YAML should no longer have override, should have add
-    const childYaml = readFileSync(join(reabasePath, "presets", "child.yaml"), "utf-8");
-    expect(childYaml).not.toContain("override:");
-    expect(childYaml).toContain("add:");
-    expect(childYaml).toContain(result.newSlotId);
-  });
-
-  it("throws for slotId not in any override", () => {
-    setupParentChildWithOverride();
-
-    const TRACK = `<TRACK {CCCCCCCC-DDDD-EEEE-FFFF-111111111111}
-  NAME TEST
-  TRACKID {CCCCCCCC-DDDD-EEEE-FFFF-111111111111}
-  MAINSEND 1 0
-  <EXT
-    reabase_preset child
-  >
->`;
-
-    expect(() =>
-      unlinkOverride({ trackChunk: TRACK, slotId: "nonexistent" }, reabasePath)
-    ).toThrow("not found");
-  });
-});
-
-describe.skip("linkAsOverride", () => {
-  const params1 = { "0": { name: "drive", value: 0.3 } };
-  const params2 = { "0": { name: "drive", value: 0.8 } };
-
-  function setupParentChildWithAddition() {
-    // Parent preset: one Bitcrush
-    writeFileSync(
-      join(reabasePath, "presets", "parent.yaml"),
-      "name: parent\nfxChainFile: fx/parent.json\nplugins:\n  - id: bitcrush\n",
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "parent.json"),
-      JSON.stringify([{
-        pluginName: "AU: kHs Bitcrush (Kilohearts)",
-        pluginType: "AU",
-        slotId: "bitcrush",
-        parameters: params1,
-      }], null, 2),
-      "utf-8"
-    );
-
-    // Child preset: adds a second Bitcrush (as a separate addition)
-    writeFileSync(
-      join(reabasePath, "presets", "child.yaml"),
-      "name: child\nextends: parent\nfxChainFile: fx/child.json\nadd:\n  - id: bitcrush-2\n    after: bitcrush\n",
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "child.json"),
-      JSON.stringify([{
-        pluginName: "AU: kHs Bitcrush (Kilohearts)",
-        pluginType: "AU",
-        slotId: "bitcrush-2",
-        parameters: params2,
-      }], null, 2),
-      "utf-8"
-    );
-  }
-
-  it("converts an addition into an override of a parent slot", () => {
-    setupParentChildWithAddition();
-
-    const TRACK = `<TRACK {CCCCCCCC-DDDD-EEEE-FFFF-222222222222}
-  NAME TEST
-  PEAKCOL 17236731
-  BEAT -1
-  AUTOMODE 0
-  VOLPAN 1 0 -1 -1 1
-  MUTESOLO 0 0 0
-  ISBUS 0 0
-  NCHAN 6
-  FX 1
-  TRACKID {CCCCCCCC-DDDD-EEEE-FFFF-222222222222}
-  MAINSEND 1 0
-  <FXCHAIN
-    SHOW 0
-    LASTSEL -1
-    DOCKED 0
-    BYPASS 0 0 0
-    <AU "AU: kHs Bitcrush (Kilohearts)" "" "" 0 "" ""
-      AAAA==
-    >
-    FLOATPOS 0 0 0 0
-    FXID {07EC70AF-D570-084D-ABA9-825C6F0C365C}
-    WAK 0 0
-    BYPASS 0 0 0
-    <AU "AU: kHs Bitcrush (Kilohearts)" "" "" 0 "" ""
-      BBBB==
-    >
-    FLOATPOS 0 0 0 0
-    FXID {11111111-2222-3333-4444-555555555555}
-    WAK 0 0
-  >
-  <EXT
-    reabase_preset child
-  >
->`;
-
-    const result = linkAsOverride(
-      {
-        trackChunk: TRACK,
-        childSlotId: "bitcrush-2",
-        parentSlotId: "bitcrush",
-        fxParameters: [params1, params2],
-      },
-      reabasePath
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.modifiedChunk).toContain("<TRACK");
-    // Should have 1 plugin now (override replaces, doesn't add)
-    expect(result.parameterMaps).toHaveLength(1);
-
-    // Child YAML should have override, not add
-    const childYaml = readFileSync(join(reabasePath, "presets", "child.yaml"), "utf-8");
-    expect(childYaml).toContain("override:");
-    expect(childYaml).toContain("bitcrush:");
-    expect(childYaml).not.toContain("add:");
-  });
-
-  it("throws for mismatched plugin types", () => {
-    // Parent: Bitcrush, Child adds: Delay
-    writeFileSync(
-      join(reabasePath, "presets", "parent.yaml"),
-      "name: parent\nfxChainFile: fx/parent.json\nplugins:\n  - id: bitcrush\n",
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "parent.json"),
-      JSON.stringify([{
-        pluginName: "AU: kHs Bitcrush (Kilohearts)",
-        pluginType: "AU",
-        slotId: "bitcrush",
-        parameters: params1,
-      }], null, 2),
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "child.yaml"),
-      "name: child\nextends: parent\nfxChainFile: fx/child.json\nadd:\n  - id: delay\n    after: bitcrush\n",
-      "utf-8"
-    );
-    writeFileSync(
-      join(reabasePath, "presets", "fx", "child.json"),
-      JSON.stringify([{
-        pluginName: "AU: kHs Delay (Kilohearts)",
-        pluginType: "AU",
-        slotId: "delay",
-        parameters: params2,
-      }], null, 2),
-      "utf-8"
-    );
-
-    const TRACK = `<TRACK {CCCCCCCC-DDDD-EEEE-FFFF-333333333333}
-  NAME TEST
-  TRACKID {CCCCCCCC-DDDD-EEEE-FFFF-333333333333}
-  MAINSEND 1 0
-  <EXT
-    reabase_preset child
-  >
->`;
-
-    expect(() =>
-      linkAsOverride(
-        { trackChunk: TRACK, childSlotId: "delay", parentSlotId: "bitcrush" },
-        reabasePath
-      )
-    ).toThrow("plugin types differ");
   });
 });
