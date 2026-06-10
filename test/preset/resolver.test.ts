@@ -379,6 +379,106 @@ describe("resolvePreset — excluded", () => {
   });
 });
 
+describe("resolvePreset — excludedChain", () => {
+  // Three slots so positions are unambiguous: A, B, C.
+  function setupThreeSlotComposed(extras: Partial<PresetDefinition> = {}): Map<string, LoadedPreset> {
+    writeFxChainFile("fx/voice.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: kHs Limiter (Kilohearts)", parameters: paramsB },
+      { pluginName: "AU: kHs Gain (Kilohearts)", parameters: paramsC },
+    ]);
+    return new Map<string, LoadedPreset>([
+      ["voice", lp({
+        name: "voice",
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "a" }, { id: "b" }, { id: "c" }],
+      })],
+      ["composed", lp({
+        name: "composed",
+        imports: ["voice"],
+        order: ["voice/a", "voice/b", "voice/c"],
+        ...extras,
+      })],
+    ]);
+  }
+
+  it("surfaces an excluded slot with its origin and insert-index position", () => {
+    const presets = setupThreeSlotComposed({ excluded: ["voice/b"] });
+
+    const resolved = resolvePreset("composed", presets);
+    // Absent from the apply target...
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a", "c"]);
+    // ...but surfaced with detail + position (one resolved slot, "a", precedes it).
+    expect(resolved.excludedChain).toHaveLength(1);
+    expect(resolved.excludedChain[0].fingerprint.slotId).toBe("b");
+    expect(resolved.excludedChain[0].fingerprint.origin).toBe("voice");
+    expect(resolved.excludedChain[0].position).toBe(1);
+  });
+
+  it("positions a leading excluded slot at index 0", () => {
+    const presets = setupThreeSlotComposed({ excluded: ["voice/a"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["b", "c"]);
+    expect(resolved.excludedChain[0].fingerprint.slotId).toBe("a");
+    expect(resolved.excludedChain[0].position).toBe(0);
+  });
+
+  it("positions a trailing excluded slot past the last resolved slot", () => {
+    const presets = setupThreeSlotComposed({ excluded: ["voice/c"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a", "b"]);
+    expect(resolved.excludedChain[0].fingerprint.slotId).toBe("c");
+    expect(resolved.excludedChain[0].position).toBe(2);
+  });
+
+  it("gives two adjacent excluded slots the same insert-index, in order", () => {
+    const presets = setupThreeSlotComposed({ excluded: ["voice/b", "voice/c"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a"]);
+    // Both follow the single resolved slot "a", and keep their order.
+    expect(resolved.excludedChain.map((e) => [e.fingerprint.slotId, e.position])).toEqual([
+      ["b", 1],
+      ["c", 1],
+    ]);
+  });
+
+  it("splices back to its original position when re-included (position is stable)", () => {
+    const excludedPresets = setupThreeSlotComposed({ excluded: ["voice/b"] });
+    const excluded = resolvePreset("composed", excludedPresets);
+
+    // Reconstruct the visual chain by splicing the excluded slot back in.
+    const visual = [...excluded.fxChain.map((fx) => fx.slotId)];
+    for (const e of excluded.excludedChain) {
+      visual.splice(e.position, 0, e.fingerprint.slotId);
+    }
+    expect(visual).toEqual(["a", "b", "c"]);
+
+    // Re-including (removing from `excluded`) lands "b" back at the same index.
+    const includedPresets = setupThreeSlotComposed();
+    const included = resolvePreset("composed", includedPresets);
+    expect(included.fxChain.map((fx) => fx.slotId)).toEqual(["a", "b", "c"]);
+    expect(included.excludedChain).toEqual([]);
+    expect(included.fxChain[excluded.excludedChain[0].position].slotId).toBe("b");
+  });
+
+  it("surfaces excluded slots under the default order (no explicit `order`)", () => {
+    const presets = setupThreeSlotComposed({ order: undefined, excluded: ["voice/b"] });
+
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a", "c"]);
+    expect(resolved.excludedChain[0].fingerprint.slotId).toBe("b");
+    expect(resolved.excludedChain[0].position).toBe(1);
+  });
+
+  it("is empty when nothing is excluded", () => {
+    const resolved = resolvePreset("composed", setupThreeSlotComposed());
+    expect(resolved.excludedChain).toEqual([]);
+  });
+});
+
 describe("resolvePreset — deactivated", () => {
   function setupOneSlotComposed(extras: Partial<PresetDefinition> = {}): Map<string, LoadedPreset> {
     writeFxChainFile("fx/voice.json", [

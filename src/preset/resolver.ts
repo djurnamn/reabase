@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { LoadedPreset, ResolvedPreset } from "./types.js";
+import type { ExcludedSlot, LoadedPreset, ResolvedPreset } from "./types.js";
 import type { FxFingerprint } from "../snapshot/types.js";
 import { parsePresetFxChain } from "./rfxchain.js";
 import { hashParameters } from "../snapshot/capture.js";
@@ -51,23 +51,27 @@ export function resolvePreset(
   const excludedSet = new Set(definition.excluded ?? []);
   const deactivatedSet = new Set(definition.deactivated ?? []);
 
-  const { fxChain, mentionedEntries } =
+  const { fxChain, excludedChain, mentionedEntries } =
     definition.order && definition.order.length > 0
       ? buildOrderedChain(definition, sourcesList, lookupBySource, excludedSet, deactivatedSet)
       : buildDefaultOrderChain(sourcesList, lookupBySource, excludedSet, deactivatedSet);
 
-  // Drift: append any surviving slots not mentioned in `order` and not
-  // excluded. This kicks in when an import gains a plugin since the user
-  // last edited the composed preset.
+  // Drift: append any surviving slots not mentioned in `order`. This kicks
+  // in when an import gains a plugin since the user last edited the composed
+  // preset. A drifted slot that's also excluded lands in the excluded chain
+  // at the end (after every resolved slot) rather than the resolved chain.
   for (const sp of sourcesList) {
     const inner = lookupBySource.get(sp.source)!;
     for (const sourceFp of sp.fxChain) {
       const entry = `${sp.source}/${sourceFp.slotId}`;
       if (mentionedEntries.has(entry)) continue;
-      if (excludedSet.has(entry)) continue;
       const fp = inner.get(sourceFp.slotId)!;
-      fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
       mentionedEntries.add(entry);
+      if (excludedSet.has(entry)) {
+        excludedChain.push({ fingerprint: fp, position: fxChain.length });
+        continue;
+      }
+      fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
     }
   }
 
@@ -87,6 +91,7 @@ export function resolvePreset(
     sources,
     fxChain,
     excluded: definition.excluded ? [...definition.excluded] : [],
+    excludedChain,
     version,
   };
 }
@@ -163,6 +168,10 @@ function buildLookup(
 
 interface ChainBuildResult {
   fxChain: FxFingerprint[];
+  /** Excluded slots collected during the walk, each with the insert-index
+   *  position they'd occupy in `fxChain` (= number of resolved slots before
+   *  them). Surfaced so the UI can render them grayed-in-place. */
+  excludedChain: ExcludedSlot[];
   /** "<source>/<slotId>" entries the chain build has already emitted or
    *  consumed (excluded entries count as consumed). Used to detect drift. */
   mentionedEntries: Set<string>;
@@ -176,6 +185,7 @@ function buildOrderedChain(
   deactivatedSet: Set<string>
 ): ChainBuildResult {
   const fxChain: FxFingerprint[] = [];
+  const excludedChain: ExcludedSlot[] = [];
   const mentionedEntries = new Set<string>();
 
   for (const entry of definition.order!) {
@@ -202,15 +212,18 @@ function buildOrderedChain(
     mentionedEntries.add(entry);
     if (excludedSet.has(entry)) {
       // Excluded slots are kept in `order` for visual position but are
-      // filtered out of the resolved (= apply target) chain. The UI walks
-      // `order` + the preset's `excluded` list to render them grayed.
+      // filtered out of the resolved (= apply target) chain. Record the
+      // slot with its insert-index so the UI can render it grayed-in-place.
+      // `fxChain.length` here is exactly the count of resolved slots before
+      // it. Exclusion supersedes deactivation, so don't tag bypassed.
+      excludedChain.push({ fingerprint: fp, position: fxChain.length });
       continue;
     }
 
     fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
   }
 
-  return { fxChain, mentionedEntries };
+  return { fxChain, excludedChain, mentionedEntries };
 }
 
 function buildDefaultOrderChain(
@@ -220,6 +233,7 @@ function buildDefaultOrderChain(
   deactivatedSet: Set<string>
 ): ChainBuildResult {
   const fxChain: FxFingerprint[] = [];
+  const excludedChain: ExcludedSlot[] = [];
   const mentionedEntries = new Set<string>();
 
   for (const sp of sourcesList) {
@@ -227,13 +241,16 @@ function buildDefaultOrderChain(
     for (const sourceFp of sp.fxChain) {
       const entry = `${sp.source}/${sourceFp.slotId}`;
       mentionedEntries.add(entry);
-      if (excludedSet.has(entry)) continue;
       const fp = inner.get(sourceFp.slotId)!;
+      if (excludedSet.has(entry)) {
+        excludedChain.push({ fingerprint: fp, position: fxChain.length });
+        continue;
+      }
       fxChain.push(deactivatedSet.has(entry) ? { ...fp, bypassed: true } : fp);
     }
   }
 
-  return { fxChain, mentionedEntries };
+  return { fxChain, excludedChain, mentionedEntries };
 }
 
 function validateRefList(

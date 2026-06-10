@@ -107,6 +107,24 @@ export interface PresetLoadResult {
 }
 
 /**
+ * An excluded slot, surfaced so the UI can render it grayed-in-place and
+ * offer to un-exclude it. The slot is NOT in the resolved chain (excluded
+ * slots never go on the track); this carries everything needed to draw it
+ * back into the visual chain at its intended position.
+ */
+export interface ExcludedSlot {
+  /** The excluded slot's fingerprint, with `origin` set to the source that
+   *  contributed it. Bypassed is NOT set here — exclusion supersedes
+   *  deactivation for chain inclusion. */
+  fingerprint: FxFingerprint;
+  /** Insert-index into the resolved chain: the number of resolved
+   *  (non-excluded) slots that precede this slot in `order`. The UI splices
+   *  the excluded slot in at this index to render it grayed-in-place. Stable
+   *  across exclude/re-include because `order` preserves the slot's position. */
+  position: number;
+}
+
+/**
  * A fully resolved preset with its composition applied.
  */
 export interface ResolvedPreset {
@@ -127,6 +145,11 @@ export interface ResolvedPreset {
    *  grayed-out at their `order` position. Empty when the preset has no
    *  excluded slots. */
   excluded: string[];
+  /** The excluded slots with their fingerprints and intended positions.
+   *  Parallel to `excluded` (which keeps the bare refs for back-compat), but
+   *  carries the detail and position the UI needs to render them
+   *  grayed-in-place and offer un-exclude. Empty when nothing is excluded. */
+  excludedChain: ExcludedSlot[];
   /** Hash of the resolved chain for versioning. */
   version: string;
 }

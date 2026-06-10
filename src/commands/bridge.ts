@@ -25,7 +25,7 @@ import { buildSlotMap, serializeSlotMap, parseSlotMap, resolveSlotIds } from "..
 import YAML from "yaml";
 import type { RppNode } from "../parser/types.js";
 import type { FxFingerprint, ParameterValue } from "../snapshot/types.js";
-import type { ResolvedPreset } from "../preset/types.js";
+import type { ExcludedSlot, ResolvedPreset } from "../preset/types.js";
 import type { MergeResult } from "../merge/types.js";
 
 // ─── inspect ─────────────────────────────────────────────────────
@@ -66,6 +66,11 @@ export interface InspectOutput {
    *  the resolved preset so the UI can render excluded slots without
    *  re-loading YAML. */
   excluded: string[];
+  /** The excluded slots with their fingerprint (origin set) and insert-index
+   *  position in `resolvedChain`. Lets the UI render excluded slots
+   *  grayed-in-place and offer un-exclude — `excluded` alone has only the
+   *  refs. Empty array when nothing is excluded or no preset is resolved. */
+  excludedChain: ExcludedSlot[];
   status:
     | "up-to-date"
     | "modified"
@@ -125,6 +130,7 @@ export function inspectTrack(
       sources: [],
       resolvedChain: null,
       excluded: [],
+      excludedChain: [],
       status: "no-preset",
       merge: null,
     };
@@ -145,6 +151,7 @@ export function inspectTrack(
       sources: [],
       resolvedChain: null,
       excluded: [],
+      excludedChain: [],
       status: "unresolvable-preset",
       merge: null,
     };
@@ -197,6 +204,7 @@ export function inspectTrack(
       sources: resolvedPreset.sources,
       resolvedChain: resolvedPreset.fxChain,
       excluded: resolvedPreset.excluded,
+      excludedChain: resolvedPreset.excludedChain,
       status: "no-snapshot",
       merge,
     };
@@ -287,6 +295,7 @@ export function inspectTrack(
     sources: resolvedPreset.sources,
     resolvedChain: resolvedPreset.fxChain,
     excluded: resolvedPreset.excluded,
+    excludedChain: resolvedPreset.excludedChain,
     status,
     merge,
     debug,
