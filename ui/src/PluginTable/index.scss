@@ -1,0 +1,159 @@
+@use "styles/color" as color;
+
+.PluginTable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  &__toolbar {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  &__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  &__row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    background-color: color.get(surface, 2);
+    border-radius: 0.25rem;
+
+    // Owned by another source — shown grayed for "bring over".
+    &--muted {
+      opacity: 0.5;
+    }
+
+    // Deactivated — bypassed but kept in the chain. Dim the label (not the
+    // whole row, so the power toggle stays clearly usable).
+    &--deactivated {
+      .PluginTable__name {
+        opacity: 0.5;
+        text-decoration: line-through;
+      }
+      .PluginTable__type {
+        opacity: 0.5;
+      }
+    }
+
+    // Excluded — removed from the chain, kept grayed-in-place with a diagonal
+    // hatch. (A native djui hatch overlay is a noted gap.)
+    &--excluded {
+      background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0 5px,
+        rgba(var(--djui-foreground-primary-rgb), 0.08) 5px 10px
+      );
+
+      .PluginTable__name {
+        opacity: 0.5;
+      }
+    }
+
+    &--dragging {
+      position: relative;
+      z-index: 1;
+      box-shadow: var(--djui-box-shadow-default);
+    }
+  }
+
+  &__handle {
+    flex-shrink: 0;
+    width: 1.05rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: none;
+    color: color.get(foreground, primary, 0.4);
+    cursor: grab;
+    // Let dnd-kit's pointer sensor own the gesture (no browser scroll/pan).
+    touch-action: none;
+
+    &:hover {
+      color: color.get(foreground, primary, 0.7);
+    }
+
+    &:active {
+      cursor: grabbing;
+    }
+
+    // Keeps checkbox/name aligned on non-draggable rows (no grip shown).
+    &--placeholder {
+      cursor: default;
+    }
+  }
+
+  &__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  // Staged-but-uncommitted indicator.
+  &__modified-dot {
+    flex-shrink: 0;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 999px;
+    background-color: color.get(accent, primary);
+  }
+
+  &__type {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    color: color.get(foreground, primary, 0.5);
+    text-transform: uppercase;
+  }
+
+  // Row action buttons — shared layout.
+  &__deactivate,
+  &__exclude {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    padding: 0;
+    border: none;
+    border-radius: 0.25rem;
+    background: none;
+    cursor: pointer;
+
+    &:hover {
+      background-color: color.get(surface, 3);
+    }
+  }
+
+  // Deactivate (power): lit when active — non-accent foreground here, source
+  // accent set inline in source tabs — recessed onto surface-1 when off.
+  &__deactivate {
+    color: color.get(foreground, primary);
+
+    &--off {
+      color: color.get(foreground, primary, 0.45);
+      background-color: color.get(surface, 1);
+    }
+  }
+
+  // Exclude (X): dim when available, full when the slot is excluded.
+  &__exclude {
+    color: color.get(foreground, primary, 0.4);
+
+    &--on {
+      color: color.get(foreground, primary);
+    }
+  }
+}

@@ -37,6 +37,27 @@ export interface PresetSummary {
   category: { slug: string; label: string };
 }
 
+/**
+ * One contributing source of the resolved preset, carrying that source's OWN
+ * composition fields verbatim — distinct from the composed resolution. The UI
+ * reads the entry for a source tab to render/edit that source's standalone
+ * deactivate/exclude/order. Entries are the source's own `<source>/<slotId>`
+ * refs; empty arrays when unset. Mirrors `SourceComposition` on the backend.
+ */
+export interface SourceComposition {
+  name: string;
+  deactivated: string[];
+  excluded: string[];
+  order: string[];
+}
+
+/** An excluded slot (omitted from the resolved chain) with where it belongs. */
+export interface ExcludedSlot {
+  fingerprint: FxSlot;
+  /** Insert index into `resolvedChain` — how many resolved slots precede it. */
+  position: number;
+}
+
 export interface InspectResult {
   trackName?: string;
   trackGuid?: string;
@@ -46,8 +67,13 @@ export interface InspectResult {
   currentChain: FxSlot[];
   /** What the preset says the chain should be; null when there's no preset. */
   resolvedChain: FxSlot[] | null;
-  /** Source presets contributing to the resolved chain, in resolution order. */
-  sources: string[];
+  /** Excluded slots (not in the resolved chain) with their position, so the UI
+   *  can render them grayed-in-place and offer un-exclude. */
+  excludedChain: ExcludedSlot[];
+  /** Source presets contributing to the resolved chain, in resolution order.
+   *  Each carries its OWN composition fields (see `SourceComposition`) so a
+   *  source tab can render/edit its standalone state independently. */
+  sources: SourceComposition[];
   /** "<source>/<slotId>" entries the preset excludes from the resolved chain. */
   excluded: string[];
   /** Every preset reabase loaded (for the preset picker). */

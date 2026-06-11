@@ -1,24 +1,86 @@
+import { useEffect, useState } from "react";
 import useBem from "use-bem";
 import { Button, Select, Spinner, Tabs, Typography } from "djui";
 import type { SelectOption, Tab } from "djui";
 import { Icon, Menu } from "@djui/lucide";
+import { useInvoke, toast } from "@djui/reaper-webview";
 import { Brand } from "../Brand";
 import { StatusPill } from "../StatusPill";
-import { PluginList } from "../PluginList";
+import { PluginTable } from "../PluginTable";
 import { useInspect } from "../useInspect";
+import { useStagedEdits, type TableEdits } from "../useStagedEdits";
+import {
+  deactivatedPayload,
+  excludedPayload,
+  ownershipPayload,
+} from "../ownership";
 import type { InspectResult } from "../bridge";
 import "./index.scss";
 
 /**
- * First-pass panel shell. Fixed header: a box-layout bar (brand | track+status
- * | menu, each a surface-2 area separated by thin surface-1 gaps) above the
- * preset row (plain surface-1). Below: inverted folder tabs whose panel is the
- * scrollable, full-width, height-filling area that will hold the plugin table
- * and per-tab actions. DISPLAY-ONLY — Select/Assign/⋯/+ are stubs.
+ * Panel shell: fixed surface-2 header (brand / track / menu, then the preset
+ * row) over folder tabs, with a save bar that appears while there are staged
+ * (uncommitted) edits — save-when-ready. Ownership (attach/bring-over) commits
+ * via update-presets; deactivation commits via update-composition.
  */
 export function App() {
   const bem = useBem("App");
   const { data, error, loading, refresh } = useInspect();
+  const {
+    ownership,
+    deactivation,
+    exclusion,
+    stageOwnership,
+    stageDeactivation,
+    stageExclusion,
+    clear,
+    count,
+  } = useStagedEdits();
+  const invoke = useInvoke();
+  const [saving, setSaving] = useState(false);
+
+  // A fresh inspect (track change / commit / manual refresh) is a new baseline
+  // — drop any staged edits.
+  useEffect(() => {
+    clear();
+  }, [data, clear]);
+
+  async function saveChanges() {
+    if (!data) return;
+    setSaving(true);
+    try {
+      if (ownership.size > 0) {
+        await invoke("update-presets", ownershipPayload(data, ownership));
+      }
+      // deactivation + exclusion are both composition fields on the composed
+      // preset — commit them in one update-composition call.
+      if ((deactivation.size > 0 || exclusion.size > 0) && data.preset) {
+        const fields: Record<string, unknown> = { presetName: data.preset };
+        if (deactivation.size > 0) {
+          fields.deactivated = deactivatedPayload(data, ownership, deactivation);
+        }
+        if (exclusion.size > 0) {
+          fields.excluded = excludedPayload(data, ownership, exclusion);
+        }
+        await invoke("update-composition", fields);
+      }
+      clear();
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const edits: TableEdits = {
+    ownership,
+    deactivation,
+    exclusion,
+    stageOwnership,
+    stageDeactivation,
+    stageExclusion,
+  };
 
   return (
     <div className={bem()}>
@@ -35,7 +97,7 @@ export function App() {
             </span>
             {data?.status && <StatusPill status={data.status} />}
           </div>
-          {/* TODO: popout menu (about / refresh / options). Refreshes for now. */}
+          {/* TODO: turn into a popout menu (about / refresh / options). */}
           <button
             type="button"
             className={bem("menu")}
@@ -63,8 +125,6 @@ export function App() {
         </div>
       </header>
 
-      {/* Anchor the body at surface-2 so djui's folder tabs render natively:
-          strip = current surface (2), panel = previous surface (1). */}
       <div className={bem("body")} data-djui-set-surface="2">
         {loading && !data && <Spinner />}
         {error && (
@@ -73,43 +133,86 @@ export function App() {
           </Typography>
         )}
         {data && (
-          <Tabs theme="folder" surfaceDirection="previous" tabs={buildTabs(data)} />
+          <Tabs
+            theme="folder"
+            surfaceDirection="previous"
+            tabs={buildTabs(data, edits)}
+          />
         )}
       </div>
+
+      {count > 0 && (
+        <div className={bem("footer")}>
+          <Typography variant="label">
+            {count} pending change{count > 1 ? "s" : ""}
+          </Typography>
+          <div className={bem("footer-actions")}>
+            <Button
+              label="Discard"
+              variant="soft"
+              onClick={clear}
+              disabled={saving}
+            />
+            <Button
+              label="Save changes"
+              variant="solid"
+              color="accent-primary"
+              onClick={() => void saveChanges()}
+              disabled={saving}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function presetOptions(data: InspectResult | null): SelectOption[] {
   if (!data) return [];
-  // Flat for now. Grouping by category needs <optgroup>, which djui's Select
-  // doesn't expose yet — gathered into the djui gaps handoff.
+  // Flat for now — grouping needs <optgroup> (djui gap).
   return data.presets.map((preset) => ({
     value: preset.name,
     label: preset.name,
   }));
 }
 
-function buildTabs(data: InspectResult): Tab[] {
+function buildTabs(data: InspectResult, edits: TableEdits): Tab[] {
   const tabs: Tab[] = [];
 
+  // Tab 1 IS the assigned preset's own container (its checkbox = "owned by the
+  // composed preset itself"); it shows the whole composed chain. null only when
+  // the track has no preset.
   const mainLabel =
     data.preset ?? (data.currentChain.length > 0 ? "Unsaved" : "No preset");
-  const mainSlots = data.resolvedChain ?? data.currentChain;
   tabs.push({
     id: "__main__",
     label: mainLabel,
-    content: <PluginList slots={mainSlots} />,
+    content: (
+      <PluginTable
+        data={data}
+        ownerSource={data.preset ?? null}
+        composedView
+        edits={edits}
+      />
+    ),
   });
 
-  // Composed preset: one tab per source (skip when it's just the container).
-  if (data.sources.length > 1) {
-    for (const source of data.sources) {
-      const slots = (data.resolvedChain ?? []).filter(
-        (slot) => slot.origin === source,
-      );
-      tabs.push({ id: source, label: source, content: <PluginList slots={slots} /> });
-    }
+  // One tab per imported source (the container is already tab 1).
+  for (const source of data.sources) {
+    const sourceName = source.name;
+    if (sourceName === data.preset) continue;
+    tabs.push({
+      id: sourceName,
+      label: sourceName,
+      content: (
+        <PluginTable
+          data={data}
+          ownerSource={sourceName}
+          composedView={false}
+          edits={edits}
+        />
+      ),
+    });
   }
 
   // The "+" tab (add a source) only appears once a preset is assigned.

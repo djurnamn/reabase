@@ -3,7 +3,7 @@ if (stage) stage.textContent = "Loading… (module executing)";
 
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ReaperApp } from "@djui/reaper-webview";
+import { ReaperApp, ConfirmProvider } from "@djui/reaper-webview";
 
 import "djui/styles/reset.scss";
 import "djui/styles/global.scss";
@@ -17,7 +17,9 @@ if (stage) stage.textContent = "Loading… (imports resolved)";
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ReaperApp mode="dark">
-      <App />
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>
     </ReaperApp>
   </React.StrictMode>,
 );

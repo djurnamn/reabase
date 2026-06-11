@@ -169,6 +169,51 @@ handlers["inspect"] = function()
   return result
 end
 
+-- Commit staged ownership (attach / detach / bring-over) by pushing the
+-- track's plugins back into the source preset YAMLs. `args.ownership` maps
+-- source name → owned slotIds; `args.released` lists slots dropped to local.
+-- The whole map is committed at once, so a move's both sides land atomically.
+handlers["update-presets"] = function(args)
+  local track = reaper.GetSelectedTrack(0, 0)
+  if not track then error("No track selected") end
+
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+
+  local chunk = get_track_chunk(track)
+  if not chunk then error("Could not read the track's state chunk") end
+
+  local fx_params = capture_fx_parameters(track)
+  local result, err = bridge.update_presets(
+    chunk, args.ownership or {}, args.released or {}, reabase_path, fx_params
+  )
+  if not result then error(err or "update-presets failed") end
+
+  -- Ownership lives in the preset YAMLs; the only track-side change is the
+  -- refreshed slot map in the modified chunk. Write it back.
+  reaper.SetTrackStateChunk(track, result.modifiedChunk, false)
+  return { success = true, updatedPresets = result.updatedPresets }
+end
+
+-- Commit staged composition edits (deactivate; later exclude/order) by writing
+-- the composed preset's fields. Edits the preset YAML only — the track reflects
+-- the change on the next apply/sync (not done here).
+handlers["update-composition"] = function(args)
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+  if not args.presetName or args.presetName == "" then
+    error("No preset to edit")
+  end
+
+  local result, err = bridge.update_composition(args.presetName, args, reabase_path)
+  if not result then error(err or "update-composition failed") end
+  return result
+end
+
 -- ─── Message dispatch ────────────────────────────────────────────
 
 local function handle_message(raw)

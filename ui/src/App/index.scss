@@ -102,6 +102,23 @@
     background-color: color.get(surface, 1);
   }
 
+  // Fixed save bar — appears while there are staged edits.
+  &__footer {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background-color: color.get(surface, 2);
+    border-top: 1px solid color.get(foreground, primary, 0.1);
+  }
+
+  &__footer-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
   // Layout only: make djui's folder Tabs fill the body and let just the panel
   // scroll, with the strip pinned. (Surfaces + padding come from djui.) Bridges
   // until djui exposes the strip/panel separately — see the djui gaps handoff.
