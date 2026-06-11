@@ -326,6 +326,38 @@ function bridge.delete_preset(preset_name, reabase_path)
   return result.success == true and result.deleted == true, nil
 end
 
+--- Remove a plugin from a source preset's own plugins — the destructive
+--- counterpart to excluding it. Drops the slot from the preset's `plugins` +
+--- `fxChainFile` and scrubs any dangling refs to it from every preset's
+--- composition. Edits preset YAMLs only — the caller removes the FX from the
+--- track separately; downstream tracks reconcile on their next sync.
+---@param preset_name string The source preset to remove the plugin from
+---@param slot_id string The slotId of the plugin to remove
+---@param reabase_path string|nil Optional path to search from
+---@return boolean success
+---@return string|nil error
+function bridge.delete_plugin(preset_name, slot_id, reabase_path)
+  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
+  local input = json.encode({
+    presetName = preset_name,
+    slotId = slot_id,
+  })
+
+  local output, code = run_cli("delete-plugin" .. path_arg, input)
+  if not output or output == "" then
+    return false, "Failed to run reabase delete-plugin"
+  end
+
+  local ok, result = pcall(json.decode, output)
+  if not ok then
+    return false, "Failed to parse delete-plugin JSON: " .. tostring(result)
+  end
+  if result.error then
+    return false, result.error
+  end
+  return result.success == true, nil
+end
+
 --- Update preset files from the track's current state and ownership assignments.
 ---@param track_chunk string The full track chunk
 ---@param ownership table Map of preset name -> array of slotIds
@@ -379,6 +411,38 @@ function bridge.revert_plugin(track_chunk, slot_id, reabase_path)
   local ok, result = pcall(json.decode, output)
   if not ok then
     return nil, "Failed to parse revert-plugin JSON: " .. tostring(result)
+  end
+  if result.error then
+    return nil, result.error
+  end
+  return result, nil
+end
+
+--- Edit a composed preset's composition fields. Only the fields present in
+--- `fields` are changed (the CLI leaves omitted ones alone); pass an empty
+--- array to clear a field. No track chunk needed — this edits the preset YAML.
+---@param preset_name string The composed preset to edit
+---@param fields table { imports?, order?, deactivated?, excluded? }
+---@param reabase_path string|nil Optional path to search from
+---@return table|nil result { success, presetName }
+---@return string|nil error
+function bridge.update_composition(preset_name, fields, reabase_path)
+  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
+  local payload = { presetName = preset_name }
+  if fields.imports ~= nil then payload.imports = fields.imports end
+  if fields.order ~= nil then payload.order = fields.order end
+  if fields.deactivated ~= nil then payload.deactivated = fields.deactivated end
+  if fields.excluded ~= nil then payload.excluded = fields.excluded end
+  local input = json.encode(payload)
+
+  local output, code = run_cli("update-composition" .. path_arg, input)
+  if not output or output == "" then
+    return nil, "Failed to run reabase update-composition"
+  end
+
+  local ok, result = pcall(json.decode, output)
+  if not ok then
+    return nil, "Failed to parse update-composition JSON: " .. tostring(result)
   end
   if result.error then
     return nil, result.error

@@ -58,7 +58,7 @@ describe("resolvePreset — plain presets", () => {
 
     const resolved = resolvePreset("voice", presets);
     expect(resolved.name).toBe("voice");
-    expect(resolved.sources).toEqual(["voice"]);
+    expect(resolved.sources.map((s) => s.name)).toEqual(["voice"]);
     expect(resolved.fxChain).toHaveLength(1);
     expect(resolved.fxChain[0].slotId).toBe("khs-compressor");
     expect(resolved.fxChain[0].origin).toBe("voice");
@@ -171,7 +171,7 @@ describe("resolvePreset — composition", () => {
     }));
 
     const resolved = resolvePreset("voice.character.female", presets);
-    expect(resolved.sources).toEqual(["voice", "role.character", "gender.female"]);
+    expect(resolved.sources.map((s) => s.name)).toEqual(["voice", "role.character", "gender.female"]);
     expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
       "khs-compressor",
       "khs-filter-1",
@@ -194,7 +194,7 @@ describe("resolvePreset — composition", () => {
     }));
 
     const resolved = resolvePreset("voice.character.female", presets);
-    expect(resolved.sources).toEqual(["voice.character.female", "voice", "role.character"]);
+    expect(resolved.sources.map((s) => s.name)).toEqual(["voice.character.female", "voice", "role.character"]);
     expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
       "khs-tilt",
       "khs-compressor",
@@ -250,7 +250,7 @@ describe("resolvePreset — composition", () => {
     ]);
   });
 
-  it("throws on an order entry referencing an unknown source", () => {
+  it("skips an order entry referencing an unknown source (tolerated, not fatal)", () => {
     const presets = setupBasicMixins();
     presets.set("composed", lp({
       name: "composed",
@@ -258,12 +258,13 @@ describe("resolvePreset — composition", () => {
       order: ["typo/khs-compressor"],
     }));
 
-    expect(() => resolvePreset("composed", presets)).toThrow(
-      /unknown source 'typo'/
-    );
+    // The dangling order entry is ignored; the real `voice` slot still
+    // resolves (via drift) rather than the whole preset becoming unresolvable.
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["khs-compressor"]);
   });
 
-  it("throws on an order entry referencing an unknown slot in a known source", () => {
+  it("skips an order entry referencing an unknown slot in a known source", () => {
     const presets = setupBasicMixins();
     presets.set("composed", lp({
       name: "composed",
@@ -271,9 +272,8 @@ describe("resolvePreset — composition", () => {
       order: ["voice/missing-slot"],
     }));
 
-    expect(() => resolvePreset("composed", presets)).toThrow(
-      /references slot 'missing-slot'/
-    );
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["khs-compressor"]);
   });
 });
 
@@ -362,20 +362,28 @@ describe("resolvePreset — excluded", () => {
     expect(resolved.excluded).toEqual(["voice/khs-limiter"]);
   });
 
-  it("rejects an excluded entry referencing a slot that doesn't exist", () => {
+  it("tolerates an excluded entry referencing a slot that doesn't exist", () => {
     const presets = setupTwoSlotComposed({ excluded: ["voice/missing"] });
 
-    expect(() => resolvePreset("composed", presets)).toThrow(
-      /'excluded' entry 'voice\/missing' references slot 'missing'/
-    );
+    // A dangling exclude matches no resolved slot, so it has no effect: both
+    // real slots stay in the chain and nothing lands in the excluded chain.
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-compressor",
+      "khs-limiter",
+    ]);
+    expect(resolved.excludedChain).toEqual([]);
   });
 
-  it("rejects an excluded entry pointing at a source that isn't loaded", () => {
+  it("tolerates an excluded entry pointing at a source that isn't loaded", () => {
     const presets = setupTwoSlotComposed({ excluded: ["typo/khs-limiter"] });
 
-    expect(() => resolvePreset("composed", presets)).toThrow(
-      /'excluded' entry 'typo\/khs-limiter' references unknown source 'typo'/
-    );
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual([
+      "khs-compressor",
+      "khs-limiter",
+    ]);
+    expect(resolved.excludedChain).toEqual([]);
   });
 });
 
@@ -518,12 +526,14 @@ describe("resolvePreset — deactivated", () => {
     expect(resolved.excluded).toEqual(["voice/khs-compressor"]);
   });
 
-  it("rejects a deactivated entry referencing a slot that doesn't exist", () => {
+  it("tolerates a deactivated entry referencing a slot that doesn't exist", () => {
     const presets = setupOneSlotComposed({ deactivated: ["voice/missing"] });
 
-    expect(() => resolvePreset("composed", presets)).toThrow(
-      /'deactivated' entry 'voice\/missing' references slot 'missing'/
-    );
+    // A dangling deactivate matches no resolved slot, so no slot is bypassed.
+    const resolved = resolvePreset("composed", presets);
+    expect(resolved.fxChain).toHaveLength(1);
+    expect(resolved.fxChain[0].slotId).toBe("khs-compressor");
+    expect(resolved.fxChain[0].bypassed).toBeFalsy();
   });
 });
 
@@ -564,5 +574,108 @@ describe("resolvePreset — versioning", () => {
     const v2 = resolvePreset("composed", base).version;
 
     expect(v1).not.toBe(v2);
+  });
+});
+
+describe("resolvePreset — per-source composition", () => {
+  /** A "deesser" mixin with two own plugins, deactivating one of them in its
+   *  OWN composition, plus a "vox" preset that imports it and deactivates the
+   *  OTHER slot at the composed level. Exercises the independence of an
+   *  import's own composition from the composing preset's. */
+  function setupOwnDeactivation(): Map<string, LoadedPreset> {
+    writeFxChainFile("fx/deesser.json", [
+      { pluginName: "AU: kHs Filter Lowcut (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: T-De-Esser 2 (Techivation)", parameters: paramsB },
+    ]);
+
+    return new Map<string, LoadedPreset>([
+      ["deesser", lp({
+        name: "deesser",
+        fxChainFile: "fx/deesser.json",
+        plugins: [{ id: "hp" }, { id: "de" }],
+        // The mixin deactivates its own high-pass when used standalone.
+        deactivated: ["deesser/hp"],
+      })],
+      ["vox", lp({
+        name: "vox",
+        imports: ["deesser"],
+        // The composition deactivates the de-esser, NOT the high-pass.
+        deactivated: ["deesser/de"],
+      })],
+    ]);
+  }
+
+  it("reports an import's own `deactivated` on `sources`, independent of the composed preset", () => {
+    const presets = setupOwnDeactivation();
+    const resolved = resolvePreset("vox", presets);
+
+    expect(resolved.sources).toHaveLength(1);
+    const deesser = resolved.sources[0];
+    expect(deesser.name).toBe("deesser");
+    // The import's OWN deactivated — not the composition's ["deesser/de"].
+    expect(deesser.deactivated).toEqual(["deesser/hp"]);
+    expect(deesser.excluded).toEqual([]);
+    expect(deesser.order).toEqual([]);
+  });
+
+  it("bypasses the composed-deactivated slot in resolvedChain while the import's own deactivated stays its own", () => {
+    const presets = setupOwnDeactivation();
+    const resolved = resolvePreset("vox", presets);
+
+    const byId = new Map(resolved.fxChain.map((fx) => [fx.slotId, fx]));
+    // Composed deactivated ["deesser/de"] → de is bypassed in the resolved chain.
+    expect(byId.get("de")?.bypassed).toBe(true);
+    // hp is in the import's OWN deactivated but NOT the composition's, so the
+    // composed resolution leaves it active.
+    expect(byId.get("hp")?.bypassed).toBeUndefined();
+    // …and the import's own deactivated is reported verbatim, unaffected.
+    expect(resolved.sources[0].deactivated).toEqual(["deesser/hp"]);
+  });
+
+  it("applies the import's own deactivated when the import is resolved standalone", () => {
+    const presets = setupOwnDeactivation();
+    const resolved = resolvePreset("deesser", presets);
+
+    const byId = new Map(resolved.fxChain.map((fx) => [fx.slotId, fx]));
+    // Standalone, the mixin's own deactivated takes effect.
+    expect(byId.get("hp")?.bypassed).toBe(true);
+    expect(byId.get("de")?.bypassed).toBeUndefined();
+    // The container source reports its own fields.
+    expect(resolved.sources.map((s) => s.name)).toEqual(["deesser"]);
+    expect(resolved.sources[0].deactivated).toEqual(["deesser/hp"]);
+  });
+
+  it("exposes own `excluded` and `order` per source, with empty arrays when unset", () => {
+    writeFxChainFile("fx/a.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: kHs Filter (Kilohearts)", parameters: paramsB },
+    ]);
+    writeFxChainFile("fx/b.json", [
+      { pluginName: "AU: TOTape9 (Kilohearts)", parameters: paramsC },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["a", lp({
+        name: "a",
+        fxChainFile: "fx/a.json",
+        plugins: [{ id: "comp" }, { id: "filt" }],
+        excluded: ["a/filt"],
+        order: ["a/filt", "a/comp"],
+      })],
+      ["b", lp({ name: "b", fxChainFile: "fx/b.json", plugins: [{ id: "tape" }] })],
+      ["composed", lp({ name: "composed", imports: ["a", "b"] })],
+    ]);
+
+    const resolved = resolvePreset("composed", presets);
+    const byName = new Map(resolved.sources.map((s) => [s.name, s]));
+    expect(byName.get("a")).toMatchObject({
+      excluded: ["a/filt"],
+      order: ["a/filt", "a/comp"],
+      deactivated: [],
+    });
+    expect(byName.get("b")).toMatchObject({
+      deactivated: [],
+      excluded: [],
+      order: [],
+    });
   });
 });

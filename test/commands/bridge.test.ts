@@ -5,7 +5,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets } from "../../src/commands/bridge.js";
+import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets, deletePlugin } from "../../src/commands/bridge.js";
+import { loadPresets } from "../../src/preset/loader.js";
+import { resolvePreset } from "../../src/preset/resolver.js";
+import YAML from "yaml";
 import { resolve } from "node:path";
 
 const FIXTURES = resolve(import.meta.dirname, "../fixtures");
@@ -443,7 +446,7 @@ describe("inspectTrack", () => {
     writePreset("player_voice", presetPlugins);
 
     const result = inspectTrack(TRACK_CHUNK_WITH_ROLE, reabasePath);
-    expect(result.sources).toEqual(["player_voice"]);
+    expect(result.sources.map((s) => s.name)).toEqual(["player_voice"]);
     expect(result.resolvedChain).not.toBeNull();
     expect(result.resolvedChain!).toHaveLength(1);
     expect(result.resolvedChain![0].pluginName).toBe("AU: T-De-Esser 2 (Techivation)");
@@ -1270,5 +1273,120 @@ describe("updatePresets", () => {
     const yaml = readFileSync(join(reabasePath, "presets", "player_voice.yaml"), "utf-8");
     expect(yaml).toContain("name: player_voice");
     expect(yaml).toContain("plugins:");
+  });
+});
+
+describe("deletePlugin", () => {
+  /** Write a plain preset YAML *with* an explicit plugins id list (the shape
+   *  savePreset/updatePresets produce) + an index-aligned fxChainFile. Extra
+   *  YAML fields (imports/order/deactivated/excluded) can be layered on. */
+  function writeOwnedPreset(
+    name: string,
+    slotIds: string[],
+    extra: Record<string, unknown> = {}
+  ): void {
+    writeFileSync(
+      join(reabasePath, "presets", `${name}.yaml`),
+      YAML.stringify({
+        name,
+        fxChainFile: `fx/${name}.json`,
+        plugins: slotIds.map((id) => ({ id })),
+        ...extra,
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(reabasePath, "presets", "fx", `${name}.json`),
+      JSON.stringify(
+        slotIds.map((id) => ({
+          pluginName: `AU: ${id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: id,
+          parameters: { "0": { name: "x", value: 0.5 } },
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  }
+
+  function readYaml(name: string): Record<string, unknown> {
+    return YAML.parse(
+      readFileSync(join(reabasePath, "presets", `${name}.yaml`), "utf-8")
+    );
+  }
+
+  it("removes the plugin from the source preset's own plugins + fxChainFile", () => {
+    writeOwnedPreset("voice", ["a", "b", "c"]);
+
+    const result = deletePlugin({ presetName: "voice", slotId: "b" }, reabasePath);
+    expect(result.success).toBe(true);
+
+    expect(readYaml("voice").plugins).toEqual([{ id: "a" }, { id: "c" }]);
+    const chain = JSON.parse(
+      readFileSync(join(reabasePath, "presets", "fx", "voice.json"), "utf-8")
+    ) as { slotId: string }[];
+    expect(chain.map((p) => p.slotId)).toEqual(["a", "c"]);
+  });
+
+  it("scrubs dangling refs from a composed preset that imports the source", () => {
+    writeOwnedPreset("voice", ["a", "b"]);
+    writeFileSync(
+      join(reabasePath, "presets", "comp.yaml"),
+      YAML.stringify({
+        name: "comp",
+        imports: ["voice"],
+        order: ["voice/a", "voice/b"],
+        deactivated: ["voice/a"],
+        excluded: ["voice/b"],
+      }),
+      "utf-8"
+    );
+
+    deletePlugin({ presetName: "voice", slotId: "a" }, reabasePath);
+
+    const comp = readYaml("comp");
+    expect(comp.order).toEqual(["voice/b"]);
+    // deactivated only held voice/a → cleared entirely from the YAML.
+    expect(comp.deactivated).toBeUndefined();
+    // excluded didn't reference the deleted slot → untouched.
+    expect(comp.excluded).toEqual(["voice/b"]);
+
+    // And the composed preset still resolves (no unresolvable-preset). `b` is
+    // legitimately excluded here, so it lands in the excluded chain rather
+    // than the active one — the point is that resolution no longer throws.
+    const { presets } = loadPresets(join(reabasePath, "presets"));
+    const resolved = resolvePreset("comp", presets);
+    expect(resolved.fxChain).toEqual([]);
+    expect(resolved.excludedChain.map((e) => e.fingerprint.slotId)).toEqual(["b"]);
+  });
+
+  it("scrubs the source preset's own composition refs (source-scope)", () => {
+    writeOwnedPreset("voice", ["a", "b"], {
+      order: ["voice/a", "voice/b"],
+      deactivated: ["voice/a"],
+    });
+
+    deletePlugin({ presetName: "voice", slotId: "a" }, reabasePath);
+
+    const voice = readYaml("voice");
+    expect(voice.plugins).toEqual([{ id: "b" }]);
+    expect(voice.order).toEqual(["voice/b"]);
+    expect(voice.deactivated).toBeUndefined();
+  });
+
+  it("throws when the preset does not exist", () => {
+    expect(() =>
+      deletePlugin({ presetName: "ghost", slotId: "a" }, reabasePath)
+    ).toThrow(/Preset 'ghost' not found/);
+  });
+
+  it("throws when the slot is not one of the preset's own plugins", () => {
+    writeOwnedPreset("voice", ["a", "b"]);
+    expect(() =>
+      deletePlugin({ presetName: "voice", slotId: "nope" }, reabasePath)
+    ).toThrow(/not one of preset 'voice's own plugins/);
   });
 });

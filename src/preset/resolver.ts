@@ -42,7 +42,6 @@ export function resolvePreset(
   }
 
   const sourcesList = gatherSources(definition, presets);
-  const sources = sourcesList.map((s) => s.source);
 
   rejectCrossSourceCollisions(name, sourcesList);
 
@@ -53,7 +52,7 @@ export function resolvePreset(
 
   const { fxChain, excludedChain, mentionedEntries } =
     definition.order && definition.order.length > 0
-      ? buildOrderedChain(definition, sourcesList, lookupBySource, excludedSet, deactivatedSet)
+      ? buildOrderedChain(definition, lookupBySource, excludedSet, deactivatedSet)
       : buildDefaultOrderChain(sourcesList, lookupBySource, excludedSet, deactivatedSet);
 
   // Drift: append any surviving slots not mentioned in `order`. This kicks
@@ -75,8 +74,10 @@ export function resolvePreset(
     }
   }
 
-  validateRefList(name, definition.deactivated, "deactivated", lookupBySource, sources);
-  validateRefList(name, definition.excluded, "excluded", lookupBySource, sources);
+  // Dangling `deactivated`/`excluded` refs are tolerated, not validated: a
+  // ref whose source or slot no longer exists simply never matches a resolved
+  // slot above, so it has no effect. (delete-plugin scrubs such refs eagerly;
+  // this is the safety net for hand-edits and other sources of drift.)
 
   const versionInput = fxChain
     .map((fx) => `${fx.pluginType}::${fx.pluginName}::${fx.stateHash}::${fx.bypassed ? "bypass" : "active"}`)
@@ -88,7 +89,12 @@ export function resolvePreset(
 
   return {
     name,
-    sources,
+    sources: sourcesList.map((s) => ({
+      name: s.source,
+      deactivated: [...s.deactivated],
+      excluded: [...s.excluded],
+      order: [...s.order],
+    })),
     fxChain,
     excluded: definition.excluded ? [...definition.excluded] : [],
     excludedChain,
@@ -99,6 +105,12 @@ export function resolvePreset(
 interface SourcePlugins {
   source: string;
   fxChain: FxFingerprint[];
+  /** The source's OWN composition fields, verbatim from its YAML (empty when
+   *  unset). Surfaced on `ResolvedPreset.sources` so the UI can read a source
+   *  tab's standalone state independently of the composed resolution. */
+  deactivated: string[];
+  excluded: string[];
+  order: string[];
 }
 
 function gatherSources(
@@ -111,6 +123,9 @@ function gatherSources(
     sourcesList.push({
       source: definition.name,
       fxChain: loadOwnPlugins(definition),
+      deactivated: definition.deactivated ?? [],
+      excluded: definition.excluded ?? [],
+      order: definition.order ?? [],
     });
   }
 
@@ -125,7 +140,13 @@ function gatherSources(
       const fxChain = importedDef.fxChainFile
         ? loadOwnPlugins(importedDef)
         : [];
-      sourcesList.push({ source: importName, fxChain });
+      sourcesList.push({
+        source: importName,
+        fxChain,
+        deactivated: importedDef.deactivated ?? [],
+        excluded: importedDef.excluded ?? [],
+        order: importedDef.order ?? [],
+      });
     }
   }
 
@@ -179,7 +200,6 @@ interface ChainBuildResult {
 
 function buildOrderedChain(
   definition: LoadedPreset,
-  sourcesList: SourcePlugins[],
   lookupBySource: Map<string, Map<string, FxFingerprint>>,
   excludedSet: Set<string>,
   deactivatedSet: Set<string>
@@ -193,21 +213,16 @@ function buildOrderedChain(
     const sourceName = entry.slice(0, slashIndex);
     const slotId = entry.slice(slashIndex + 1);
 
+    // Tolerate dangling refs: an `order` entry whose source or slot no longer
+    // exists is skipped, not fatal. This keeps a composed preset resolvable
+    // after a plugin is deleted from a source (delete-plugin) or a source's
+    // chain is hand-edited — the symmetric counterpart to the drift handling
+    // below, which tolerates *added* slots missing from `order`. Format is
+    // still enforced by the loader; only semantic existence is forgiven here.
     const sourceLookup = lookupBySource.get(sourceName);
-    if (!sourceLookup) {
-      const known = sourcesList.map((s) => s.source).join(", ");
-      throw new Error(
-        `Preset '${definition.name}': order entry '${entry}' references unknown source '${sourceName}'. ` +
-          `Available sources: [${known}].`
-      );
-    }
+    if (!sourceLookup) continue;
     const fp = sourceLookup.get(slotId);
-    if (!fp) {
-      throw new Error(
-        `Preset '${definition.name}': order entry '${entry}' references slot '${slotId}' ` +
-          `which does not exist in source '${sourceName}'.`
-      );
-    }
+    if (!fp) continue;
 
     mentionedEntries.add(entry);
     if (excludedSet.has(entry)) {
@@ -251,34 +266,6 @@ function buildDefaultOrderChain(
   }
 
   return { fxChain, excludedChain, mentionedEntries };
-}
-
-function validateRefList(
-  presetName: string,
-  list: string[] | undefined,
-  fieldName: "deactivated" | "excluded",
-  lookupBySource: Map<string, Map<string, FxFingerprint>>,
-  sources: string[]
-): void {
-  if (!list || list.length === 0) return;
-  for (const entry of list) {
-    const slashIndex = entry.indexOf("/");
-    const sourceName = entry.slice(0, slashIndex);
-    const slotId = entry.slice(slashIndex + 1);
-    const sourceLookup = lookupBySource.get(sourceName);
-    if (!sourceLookup) {
-      throw new Error(
-        `Preset '${presetName}': '${fieldName}' entry '${entry}' references unknown source '${sourceName}'. ` +
-          `Available sources: [${sources.join(", ")}].`
-      );
-    }
-    if (!sourceLookup.has(slotId)) {
-      throw new Error(
-        `Preset '${presetName}': '${fieldName}' entry '${entry}' references slot '${slotId}' ` +
-          `which does not exist in source '${sourceName}'.`
-      );
-    }
-  }
 }
 
 function loadOwnPlugins(definition: LoadedPreset): FxFingerprint[] {

@@ -125,6 +125,32 @@ export interface ExcludedSlot {
 }
 
 /**
+ * One contributing source of a composed preset, carrying that source's OWN
+ * composition fields verbatim from its YAML — distinct from the composed
+ * preset's resolved state. Two presets' lists are genuinely independent: a
+ * slot can be active in import A standalone yet deactivated in the
+ * composition that imports it. The UI reads the entry for a source tab to
+ * render/edit that source's standalone deactivate/exclude/order, writing back
+ * via `update-composition(presetName: <source>, …)`.
+ *
+ * Entries in these lists are the source's own `<sourceName>/<slotId>` refs
+ * (the source name is the source's own `name`), exactly as stored — empty
+ * arrays when the field is unset.
+ */
+export interface SourceComposition {
+  /** The source preset's name — its own `name`. Used as the source-tab key
+   *  and to color-code rows by `origin`. For the container source this equals
+   *  the composed preset's own `name`. */
+  name: string;
+  /** This source's own `deactivated`, verbatim. Empty when unset. */
+  deactivated: string[];
+  /** This source's own `excluded`, verbatim. Empty when unset. */
+  excluded: string[];
+  /** This source's own `order`, verbatim. Empty when unset. */
+  order: string[];
+}
+
+/**
  * A fully resolved preset with its composition applied.
  */
 export interface ResolvedPreset {
@@ -132,9 +158,10 @@ export interface ResolvedPreset {
   name: string;
   /** All sources that contributed to this preset, in resolution order:
    *  the container's own `name` (when it has own plugins) followed by each
-   *  entry from `imports`. The Lua UI uses this to render per-source tabs
-   *  and to color-code rows by `origin`. */
-  sources: string[];
+   *  entry from `imports`. Each entry carries that source's OWN composition
+   *  fields (see `SourceComposition`) so the UI can render/edit a source tab's
+   *  standalone state independently of the composed resolution. */
+  sources: SourceComposition[];
   /** The resolved FX chain — slots not excluded, in `order`-defined
    *  position. Each fingerprint's `origin` is set to the source that
    *  contributed it, and `bypassed` is set when the slot was listed in the

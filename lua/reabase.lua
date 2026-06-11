@@ -1607,7 +1607,10 @@ local function render_tab_bar()
   if not inspect then return end
 
   local has_preset = inspect.preset and inspect.preset ~= ""
-  local chain = inspect.sources or {}
+  -- `inspect.sources` entries are now objects ({ name, deactivated, … });
+  -- this legacy UI only needs the names, so flatten to a name list.
+  local chain = {}
+  for _, s in ipairs(inspect.sources or {}) do chain[#chain + 1] = s.name end
 
   -- Default selected_tab
   if not state.selected_tab then
@@ -1910,7 +1913,8 @@ local function render_fx_table()
       local inspect_data = state.inspect
       if not inspect_data or not inspect_data.sources then return false end
       -- Current tab must not be the root preset (must have ancestors)
-      local chain_list = inspect_data.sources
+      local chain_list = {}
+      for _, s in ipairs(inspect_data.sources) do chain_list[#chain_list + 1] = s.name end
       if #chain_list < 2 then return false end
       -- Current tab must be after the first in the chain (i.e., is a child)
       local tab_idx = nil
@@ -2083,7 +2087,10 @@ local function render_fx_table()
             -- present a selection dialog to choose which one to override.
             -- For now, find the first matching ancestor slot.
             local inspect_data = state.inspect
-            local chain_list = inspect_data and inspect_data.sources or {}
+            local chain_list = {}
+            for _, s in ipairs(inspect_data and inspect_data.sources or {}) do
+              chain_list[#chain_list + 1] = s.name
+            end
             local tab_idx = 0
             for ci, name in ipairs(chain_list) do
               if name == state.selected_tab then tab_idx = ci; break end
@@ -2229,7 +2236,7 @@ local function render_save_preset_modal()
       if state.selected_tab == EXTEND_TAB then
         local inspect = state.inspect
         if inspect and inspect.sources and #inspect.sources > 0 then
-          extends_preset = inspect.sources[#inspect.sources]  -- leaf
+          extends_preset = inspect.sources[#inspect.sources].name  -- leaf
         end
       end
       reaper.ImGui_CloseCurrentPopup(ctx)

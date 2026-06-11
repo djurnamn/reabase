@@ -19,13 +19,13 @@ import { loadPresets } from "../preset/loader.js";
 import { resolvePreset } from "../preset/resolver.js";
 import { buildSlotSourceMap } from "../preset/membership.js";
 import { threeWayMerge } from "../merge/three-way.js";
-import { updatePresetOwnPlugins, updateComposition } from "../preset/writer.js";
+import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin } from "../preset/writer.js";
 import { applyResolvedChainToTrack } from "./apply.js";
 import { buildSlotMap, serializeSlotMap, parseSlotMap, resolveSlotIds } from "../slot/map.js";
 import YAML from "yaml";
 import type { RppNode } from "../parser/types.js";
 import type { FxFingerprint, ParameterValue } from "../snapshot/types.js";
-import type { ExcludedSlot, ResolvedPreset } from "../preset/types.js";
+import type { ExcludedSlot, ResolvedPreset, SourceComposition } from "../preset/types.js";
 import type { MergeResult } from "../merge/types.js";
 
 // ─── inspect ─────────────────────────────────────────────────────
@@ -57,8 +57,10 @@ export interface InspectOutput {
   categories: { slug: string; label: string }[];
   /** Sources contributing to the resolved preset, in resolution order:
    *  the container's own name (when it has its own plugins) followed by each
-   *  imported preset. */
-  sources: string[];
+   *  imported preset. Each entry carries that source's OWN composition fields
+   *  (`deactivated`/`excluded`/`order`) verbatim, so a source tab can render
+   *  and edit its standalone state independently of the composed resolution. */
+  sources: SourceComposition[];
   /** Preset's ideal resolved state (with origin set), null if no preset */
   resolvedChain: FxFingerprint[] | null;
   /** "<sourceName>/<slotId>" entries the preset has excluded from the
@@ -742,11 +744,11 @@ export function updatePresets(
 
   const { presets } = loadPresets(presetsDirectory);
   const resolvedPreset = resolvePreset(presetName, presets);
-  const sources = resolvedPreset.sources;
 
   const updatedPresets: string[] = [];
 
-  for (const sourceName of sources) {
+  for (const source of resolvedPreset.sources) {
+    const sourceName = source.name;
     const ownedSlotIds = input.ownership[sourceName];
     if (!ownedSlotIds || ownedSlotIds.length === 0) continue;
 
@@ -939,10 +941,10 @@ export function pullSource(
   const { presets } = loadPresets(presetsDirectory);
   const resolvedPreset = resolvePreset(preset, presets);
 
-  if (!resolvedPreset.sources.includes(input.source)) {
+  if (!resolvedPreset.sources.some((s) => s.name === input.source)) {
     throw new Error(
       `'${input.source}' is not a source of preset '${preset}'. ` +
-        `Sources: [${resolvedPreset.sources.join(", ")}].`
+        `Sources: [${resolvedPreset.sources.map((s) => s.name).join(", ")}].`
     );
   }
 
@@ -1232,6 +1234,87 @@ export function updateCompositionBridge(
     excluded: input.excluded,
   });
   return { success: true, presetName: input.presetName };
+}
+
+// ─── delete-plugin ───────────────────────────────────────────────
+
+export interface DeletePluginInput {
+  /** The source (plain) preset to remove the plugin from. */
+  presetName: string;
+  /** The slotId of the plugin to remove — must be one of that preset's own
+   *  plugins. */
+  slotId: string;
+}
+
+export interface DeletePluginOutput {
+  success: boolean;
+}
+
+/**
+ * Fully remove a plugin from a source preset — the destructive counterpart
+ * to `exclude`. Drops the slot from the preset's own `plugins` + `fxChainFile`
+ * (via `deletePresetOwnPlugin`), then scrubs every now-dangling reference to
+ * it from any preset's `order` / `deactivated` / `excluded`.
+ *
+ * The delete is global: the slot leaves the source's definition, so every
+ * composed preset and downstream track that drew on it loses it (tracks
+ * reconcile on their next sync). This command touches only preset YAMLs — the
+ * caller removes the FX from the track separately and re-inspects.
+ *
+ * A deleted slot is referenced everywhere as `"<presetName>/<slotId>"` — that
+ * holds whether it's the source's own composition fields or a composed preset
+ * that imports the source (the ref prefix is always the owning source's
+ * name). So one ref string covers every site.
+ */
+export function deletePlugin(
+  input: DeletePluginInput,
+  reabasePath: string
+): DeletePluginOutput {
+  const presetsDirectory = join(reabasePath, "presets");
+  const { presets } = loadPresets(presetsDirectory);
+  const definition = presets.get(input.presetName);
+  if (!definition) {
+    throw new Error(`Preset '${input.presetName}' not found`);
+  }
+
+  deletePresetOwnPlugin(definition, input.slotId);
+
+  // Scrub the now-dangling ref from every preset's composition fields. The
+  // resolver tolerates leftovers, but scrubbing keeps the YAML clean and
+  // avoids a future plugin that reuses this slotId silently inheriting a
+  // stale deactivate/exclude.
+  const ref = `${input.presetName}/${input.slotId}`;
+  for (const preset of presets.values()) {
+    const scrubbed = scrubCompositionRef(preset, ref);
+    if (scrubbed) {
+      updateComposition(preset, scrubbed);
+    }
+  }
+
+  return { success: true };
+}
+
+/**
+ * Build the `updateComposition` field patch that removes `ref` from a preset's
+ * `order` / `deactivated` / `excluded`. Returns only the fields that actually
+ * contained the ref (so untouched fields are left alone), or `null` when none
+ * did. An emptied list passes through as `[]`, which `updateComposition`
+ * clears from the YAML.
+ */
+function scrubCompositionRef(
+  preset: { order?: string[]; deactivated?: string[]; excluded?: string[] },
+  ref: string
+): { order?: string[]; deactivated?: string[]; excluded?: string[] } | null {
+  const patch: { order?: string[]; deactivated?: string[]; excluded?: string[] } = {};
+  let changed = false;
+  for (const field of ["order", "deactivated", "excluded"] as const) {
+    const list = preset[field];
+    if (list && list.includes(ref)) {
+      patch[field] = list.filter((entry) => entry !== ref);
+      changed = true;
+    }
+  }
+  return changed ? patch : null;
 }
 
 // ─── blob-only change promotion (Bug 4) ──────────────────────────

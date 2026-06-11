@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import YAML from "yaml";
-import { updatePresetOwnPlugins, updateComposition } from "../../src/preset/writer.js";
+import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin } from "../../src/preset/writer.js";
 import { loadPresets } from "../../src/preset/loader.js";
 import { resolvePreset } from "../../src/preset/resolver.js";
 import type { PresetDefinition, LoadedPreset } from "../../src/preset/types.js";
@@ -262,5 +262,134 @@ describe("updateComposition", () => {
     expect(() =>
       updateComposition(composed, { imports: ["voice"] })
     ).toThrow(/Preset 'composed' not found/);
+  });
+});
+
+describe("deletePresetOwnPlugin", () => {
+  /** Write a plain preset YAML + an index-aligned fxChainFile for `slotIds`. */
+  function writePreset(name: string, slotIds: string[]): void {
+    const safe = name.replace(/[^a-z0-9]+/g, "_");
+    writeFileSync(
+      join(tempDir, `${safe}.yaml`),
+      YAML.stringify({
+        name,
+        fxChainFile: `fx/${safe}.json`,
+        plugins: slotIds.map((id) => ({ id })),
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, `fx/${safe}.json`),
+      JSON.stringify(
+        slotIds.map((id) => ({
+          pluginName: `AU: ${id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: id,
+          parameters: params,
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  }
+
+  function readChainSlotIds(name: string): string[] {
+    const safe = name.replace(/[^a-z0-9]+/g, "_");
+    const chain = JSON.parse(
+      readFileSync(join(tempDir, `fx/${safe}.json`), "utf-8")
+    ) as { slotId: string }[];
+    return chain.map((p) => p.slotId);
+  }
+
+  it("removes the slot from plugins and the index-aligned fxChainFile entry", () => {
+    writePreset("voice", ["a", "b", "c"]);
+    const { presets } = loadPresets(tempDir);
+
+    deletePresetOwnPlugin(presets.get("voice")!, "b");
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "voice.yaml"), "utf-8"));
+    expect(yaml.plugins).toEqual([{ id: "a" }, { id: "c" }]);
+    expect(yaml.fxChainFile).toBe("fx/voice.json");
+    // The fxChainFile stays index-aligned — the matching entry is gone too.
+    expect(readChainSlotIds("voice")).toEqual(["a", "c"]);
+  });
+
+  it("drops plugins + fxChainFile when removing the last own plugin", () => {
+    writePreset("solo", ["only"]);
+    const { presets } = loadPresets(tempDir);
+
+    deletePresetOwnPlugin(presets.get("solo")!, "only");
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "solo.yaml"), "utf-8"));
+    expect(yaml.plugins).toBeUndefined();
+    expect(yaml.fxChainFile).toBeUndefined();
+    expect(yaml.name).toBe("solo");
+  });
+
+  it("preserves composition fields and other plugins (does not scrub refs)", () => {
+    writeFileSync(
+      join(tempDir, "voice.yaml"),
+      YAML.stringify({
+        name: "voice",
+        fxChainFile: "fx/voice.json",
+        plugins: [{ id: "a" }, { id: "b" }],
+        imports: ["base"],
+        order: ["voice/a", "voice/b"],
+        deactivated: ["voice/b"],
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, "fx/voice.json"),
+      JSON.stringify(
+        ["a", "b"].map((id) => ({
+          pluginName: `AU: ${id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: id,
+          parameters: params,
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+    // base import so loadPresets doesn't reject the dangling import.
+    writeFileSync(
+      join(tempDir, "base.yaml"),
+      YAML.stringify({ name: "base" }),
+      "utf-8"
+    );
+
+    const { presets } = loadPresets(tempDir);
+    deletePresetOwnPlugin(presets.get("voice")!, "b");
+
+    const yaml = YAML.parse(readFileSync(join(tempDir, "voice.yaml"), "utf-8"));
+    expect(yaml.plugins).toEqual([{ id: "a" }]);
+    // The writer leaves composition refs verbatim — scrubbing is the bridge's
+    // job. The now-dangling voice/b refs stay until then.
+    expect(yaml.imports).toEqual(["base"]);
+    expect(yaml.order).toEqual(["voice/a", "voice/b"]);
+    expect(yaml.deactivated).toEqual(["voice/b"]);
+  });
+
+  it("throws when the slot is not one of the preset's own plugins", () => {
+    writePreset("voice", ["a", "b"]);
+    const { presets } = loadPresets(tempDir);
+
+    expect(() =>
+      deletePresetOwnPlugin(presets.get("voice")!, "nope")
+    ).toThrow(/not one of preset 'voice's own plugins/);
+  });
+
+  it("round-trips: the resolved chain loses the slot", () => {
+    writePreset("voice", ["a", "b", "c"]);
+    deletePresetOwnPlugin(loadPresets(tempDir).presets.get("voice")!, "b");
+
+    const { presets } = loadPresets(tempDir);
+    const resolved = resolvePreset("voice", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a", "c"]);
   });
 });
