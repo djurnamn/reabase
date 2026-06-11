@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets, deletePlugin } from "../../src/commands/bridge.js";
+import { inspectTrack, applyChunk, setPreset, savePreset, snapshotTrack, deletePreset, revertPlugin, updatePresets, deletePlugin, reorderPresetPlugins } from "../../src/commands/bridge.js";
 import { loadPresets } from "../../src/preset/loader.js";
 import { resolvePreset } from "../../src/preset/resolver.js";
 import YAML from "yaml";
@@ -1388,5 +1388,135 @@ describe("deletePlugin", () => {
     expect(() =>
       deletePlugin({ presetName: "voice", slotId: "nope" }, reabasePath)
     ).toThrow(/not one of preset 'voice's own plugins/);
+  });
+});
+
+describe("reorderPresetPlugins", () => {
+  /** Write a plain preset YAML *with* an explicit plugins id list + an
+   *  index-aligned fxChainFile, plus optional extra YAML fields. */
+  function writeOwnedPreset(
+    name: string,
+    slotIds: string[],
+    extra: Record<string, unknown> = {}
+  ): void {
+    writeFileSync(
+      join(reabasePath, "presets", `${name}.yaml`),
+      YAML.stringify({
+        name,
+        fxChainFile: `fx/${name}.json`,
+        plugins: slotIds.map((id) => ({ id })),
+        ...extra,
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(reabasePath, "presets", "fx", `${name}.json`),
+      JSON.stringify(
+        slotIds.map((id) => ({
+          pluginName: `AU: ${id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: id,
+          parameters: { "0": { name: "x", value: 0.5 } },
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  }
+
+  function readYaml(name: string): Record<string, unknown> {
+    return YAML.parse(
+      readFileSync(join(reabasePath, "presets", `${name}.yaml`), "utf-8")
+    );
+  }
+
+  function resolvedSlotIds(name: string): string[] {
+    const { presets } = loadPresets(join(reabasePath, "presets"));
+    return resolvePreset(name, presets).fxChain.map((fx) => fx.slotId);
+  }
+
+  it("permutes the preset's own plugins + fxChainFile", () => {
+    writeOwnedPreset("voice", ["a", "b", "c"]);
+
+    const result = reorderPresetPlugins(
+      { presetName: "voice", order: ["c", "a", "b"] },
+      reabasePath
+    );
+    expect(result.success).toBe(true);
+
+    expect(readYaml("voice").plugins).toEqual([
+      { id: "c" },
+      { id: "a" },
+      { id: "b" },
+    ]);
+    const chain = JSON.parse(
+      readFileSync(join(reabasePath, "presets", "fx", "voice.json"), "utf-8")
+    ) as { slotId: string }[];
+    expect(chain.map((p) => p.slotId)).toEqual(["c", "a", "b"]);
+  });
+
+  it("a composed preset importing WITHOUT pinning reflects the new default order", () => {
+    writeOwnedPreset("voice", ["a", "b", "c"]);
+    // comp imports voice with no `order` → resolver falls back to voice's
+    // internal order.
+    writeFileSync(
+      join(reabasePath, "presets", "comp.yaml"),
+      YAML.stringify({ name: "comp", imports: ["voice"] }),
+      "utf-8"
+    );
+
+    expect(resolvedSlotIds("comp")).toEqual(["a", "b", "c"]);
+
+    reorderPresetPlugins({ presetName: "voice", order: ["c", "b", "a"] }, reabasePath);
+
+    expect(resolvedSlotIds("comp")).toEqual(["c", "b", "a"]);
+  });
+
+  it("a composed preset that DOES pin those slots is unaffected", () => {
+    writeOwnedPreset("voice", ["a", "b", "c"]);
+    // comp pins an explicit order → walks its own `order`, independent of the
+    // source's internal order.
+    writeFileSync(
+      join(reabasePath, "presets", "comp.yaml"),
+      YAML.stringify({
+        name: "comp",
+        imports: ["voice"],
+        order: ["voice/a", "voice/b", "voice/c"],
+      }),
+      "utf-8"
+    );
+
+    reorderPresetPlugins({ presetName: "voice", order: ["c", "b", "a"] }, reabasePath);
+
+    // The composed resolution still follows the pinned order…
+    expect(resolvedSlotIds("comp")).toEqual(["a", "b", "c"]);
+    // …and the composed preset's own `order` YAML is untouched.
+    expect(readYaml("comp").order).toEqual([
+      "voice/a",
+      "voice/b",
+      "voice/c",
+    ]);
+  });
+
+  it("throws on an invalid order (missing/extra/foreign slotId)", () => {
+    writeOwnedPreset("voice", ["a", "b", "c"]);
+
+    expect(() =>
+      reorderPresetPlugins({ presetName: "voice", order: ["a", "b"] }, reabasePath)
+    ).toThrow(/missing own plugin/);
+    expect(() =>
+      reorderPresetPlugins(
+        { presetName: "voice", order: ["a", "b", "c", "d"] },
+        reabasePath
+      )
+    ).toThrow(/'d', which is not one of its own plugins/);
+  });
+
+  it("throws when the preset does not exist", () => {
+    expect(() =>
+      reorderPresetPlugins({ presetName: "ghost", order: [] }, reabasePath)
+    ).toThrow(/Preset 'ghost' not found/);
   });
 });

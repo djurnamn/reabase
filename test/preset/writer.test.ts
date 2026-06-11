@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import YAML from "yaml";
-import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin } from "../../src/preset/writer.js";
+import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin, reorderPresetOwnPlugins } from "../../src/preset/writer.js";
 import { loadPresets } from "../../src/preset/loader.js";
 import { resolvePreset } from "../../src/preset/resolver.js";
 import type { PresetDefinition, LoadedPreset } from "../../src/preset/types.js";
@@ -147,6 +147,178 @@ describe("updatePresetOwnPlugins", () => {
     ]);
     expect(resolved.fxChain[0].displayName).toBe("Comp");
     expect(resolved.fxChain[1].displayName).toBeUndefined();
+  });
+});
+
+describe("reorderPresetOwnPlugins", () => {
+  /** Write a plain preset YAML (with an explicit plugins id/label list) + an
+   *  index-aligned fxChainFile. Each chain entry carries a distinct param so we
+   *  can prove the JSON was permuted, not just the YAML. */
+  function writePreset(
+    name: string,
+    plugins: { id: string; label?: string }[]
+  ): void {
+    const safe = name.replace(/[^a-z0-9]+/g, "_");
+    writeFileSync(
+      join(tempDir, `${safe}.yaml`),
+      YAML.stringify({
+        name,
+        fxChainFile: `fx/${safe}.json`,
+        plugins,
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, `fx/${safe}.json`),
+      JSON.stringify(
+        plugins.map((p, i) => ({
+          pluginName: `AU: ${p.id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: p.id,
+          parameters: { "0": { name: "marker", value: i } },
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  }
+
+  function readYaml(name: string): Record<string, unknown> {
+    const safe = name.replace(/[^a-z0-9]+/g, "_");
+    return YAML.parse(readFileSync(join(tempDir, `${safe}.yaml`), "utf-8"));
+  }
+
+  function readChain(name: string): { slotId: string; parameters: Record<string, ParameterValue> }[] {
+    const safe = name.replace(/[^a-z0-9]+/g, "_");
+    return JSON.parse(readFileSync(join(tempDir, `fx/${safe}.json`), "utf-8"));
+  }
+
+  it("permutes plugins and the index-aligned fxChainFile consistently", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    const { presets } = loadPresets(tempDir);
+
+    reorderPresetOwnPlugins(presets.get("voice")!, ["c", "a", "b"]);
+
+    expect(readYaml("voice").plugins).toEqual([
+      { id: "c" },
+      { id: "a" },
+      { id: "b" },
+    ]);
+    // The fxChainFile entry at each index moved with its plugin — the `marker`
+    // param (0=a, 1=b, 2=c originally) proves the JSON rows were permuted, not
+    // just relabelled.
+    const chain = readChain("voice");
+    expect(chain.map((p) => p.slotId)).toEqual(["c", "a", "b"]);
+    expect(chain.map((p) => p.parameters["0"].value)).toEqual([2, 0, 1]);
+  });
+
+  it("preserves labels on the moved plugins", () => {
+    writePreset("voice", [
+      { id: "a", label: "Comp" },
+      { id: "b", label: "Limiter" },
+    ]);
+    const { presets } = loadPresets(tempDir);
+
+    reorderPresetOwnPlugins(presets.get("voice")!, ["b", "a"]);
+
+    expect(readYaml("voice").plugins).toEqual([
+      { id: "b", label: "Limiter" },
+      { id: "a", label: "Comp" },
+    ]);
+  });
+
+  it("round-trips through loader+resolver in the new order", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    reorderPresetOwnPlugins(loadPresets(tempDir).presets.get("voice")!, [
+      "b",
+      "c",
+      "a",
+    ]);
+
+    const { presets } = loadPresets(tempDir);
+    const resolved = resolvePreset("voice", presets);
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["b", "c", "a"]);
+  });
+
+  it("leaves composition fields untouched", () => {
+    const safe = "voice";
+    writeFileSync(
+      join(tempDir, `${safe}.yaml`),
+      YAML.stringify({
+        name: "voice",
+        fxChainFile: `fx/${safe}.json`,
+        plugins: [{ id: "a" }, { id: "b" }],
+        order: ["voice/a", "voice/b"],
+        deactivated: ["voice/b"],
+      }),
+      "utf-8"
+    );
+    writeFileSync(
+      join(tempDir, `fx/${safe}.json`),
+      JSON.stringify(
+        ["a", "b"].map((id) => ({
+          pluginName: `AU: ${id}`,
+          pluginType: "AU",
+          pluginParams: ["", "", 0, "", ""],
+          slotId: id,
+          parameters: params,
+        })),
+        null,
+        2
+      ),
+      "utf-8"
+    );
+
+    reorderPresetOwnPlugins(loadPresets(tempDir).presets.get("voice")!, ["b", "a"]);
+
+    const yaml = readYaml("voice");
+    expect(yaml.plugins).toEqual([{ id: "b" }, { id: "a" }]);
+    // The preset's OWN order/deactivated lists are verbatim — reorder only
+    // touches the plugins list + fxChainFile, never the composition fields.
+    expect(yaml.order).toEqual(["voice/a", "voice/b"]);
+    expect(yaml.deactivated).toEqual(["voice/b"]);
+  });
+
+  it("throws when order omits an own plugin", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    const { presets } = loadPresets(tempDir);
+
+    expect(() =>
+      reorderPresetOwnPlugins(presets.get("voice")!, ["a", "b"])
+    ).toThrow(/missing own plugin\(s\): c/);
+  });
+
+  it("throws when order references a foreign slot", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }]);
+    const { presets } = loadPresets(tempDir);
+
+    expect(() =>
+      reorderPresetOwnPlugins(presets.get("voice")!, ["a", "nope"])
+    ).toThrow(/'nope', which is not one of its own plugins/);
+  });
+
+  it("throws when order duplicates a slot", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }]);
+    const { presets } = loadPresets(tempDir);
+
+    expect(() =>
+      reorderPresetOwnPlugins(presets.get("voice")!, ["a", "a"])
+    ).toThrow(/lists 'a' more than once/);
+  });
+
+  it("throws when the preset has no own plugins", () => {
+    writeFileSync(
+      join(tempDir, "comp.yaml"),
+      YAML.stringify({ name: "comp" }),
+      "utf-8"
+    );
+    const { presets } = loadPresets(tempDir);
+
+    expect(() =>
+      reorderPresetOwnPlugins(presets.get("comp")!, [])
+    ).toThrow(/has no own plugins to reorder/);
   });
 });
 

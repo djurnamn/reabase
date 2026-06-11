@@ -136,6 +136,119 @@ export function deletePresetOwnPlugin(
 }
 
 /**
+ * Set a plain preset's internal plugin order directly — permute its own
+ * `plugins` list and the index-aligned `fxChainFile` entries to match `order`.
+ * The two arrays are reordered by the SAME permutation so they stay in lockstep
+ * (the resolver zips them by index — `plugins[i].id` is the authoritative slot
+ * ID for chain entry `i`; see `loadOwnPlugins`).
+ *
+ * `order` is the preset's own slot IDs in their new sequence and must be
+ * exactly the set of `plugins[].id` — no missing, extra, duplicate, or foreign
+ * entries. Reordering only permutes existing entries; it never adds or drops a
+ * plugin (use `updatePresetOwnPlugins` / `deletePresetOwnPlugin` for those).
+ *
+ * This is the preset's CANONICAL internal order: used when the preset is
+ * assigned to a track standalone, and as the default ordering a composed preset
+ * inherits when it imports the preset without pinning those slots in its own
+ * `order`. Composition fields (`imports`/`order`/`deactivated`/`excluded`) are
+ * preserved verbatim here — a composed preset that pins these slots in its own
+ * `order` walks that order and is unaffected; edit it via `updateComposition`.
+ *
+ * Throws if the preset has no own plugins, or if `order` is not exactly the set
+ * of own slot IDs.
+ */
+export function reorderPresetOwnPlugins(
+  definition: LoadedPreset,
+  order: string[]
+): void {
+  const safeFilename = slugifyName(definition.name);
+  const yamlPath = join(definition._sourceDir, `${safeFilename}.yaml`);
+  if (!existsSync(yamlPath)) {
+    throw new Error(`Preset '${definition.name}' not found at ${yamlPath}`);
+  }
+
+  const doc = YAML.parse(readFileSync(yamlPath, "utf-8")) as Record<
+    string,
+    unknown
+  >;
+  const plugins = Array.isArray(doc.plugins)
+    ? (doc.plugins as { id: string; label?: string }[])
+    : [];
+  if (plugins.length === 0) {
+    throw new Error(
+      `Preset '${definition.name}' has no own plugins to reorder`
+    );
+  }
+
+  // `order` must be exactly the preset's own slot IDs — same set, no missing,
+  // extra, duplicate, or foreign entries. Reordering permutes; it must never
+  // change which plugins the preset owns.
+  const ownIds = plugins.map((p) => p.id);
+  assertPermutation(definition.name, ownIds, order);
+
+  // Build the permutation: position k draws from the source row whose slot ID
+  // is `order[k]`. Apply it to BOTH arrays so `plugins[i]` and the
+  // `fxChainFile` entry at `i` stay index-aligned.
+  const sourceIndexById = new Map(ownIds.map((id, i) => [id, i] as const));
+  const permutation = order.map((id) => sourceIndexById.get(id)!);
+
+  doc.plugins = permutation.map((i) => plugins[i]);
+
+  const fxChainRel =
+    typeof doc.fxChainFile === "string"
+      ? doc.fxChainFile
+      : definition.fxChainFile;
+  if (fxChainRel) {
+    const fxChainAbs = resolve(definition._sourceDir, fxChainRel);
+    if (existsSync(fxChainAbs)) {
+      const chain = parsePresetFxChain(readFileSync(fxChainAbs, "utf-8"));
+      // Reorder only when the chain is index-aligned with `plugins`. A length
+      // mismatch means the files are out of sync (shouldn't happen) — leave the
+      // chain untouched rather than reorder against a stale index.
+      if (chain.length === plugins.length) {
+        const reordered = permutation.map((i) => chain[i]);
+        writeFileSync(fxChainAbs, serializePresetFxChain(reordered), "utf-8");
+      }
+    }
+  }
+
+  writeFileSync(yamlPath, YAML.stringify(doc), "utf-8");
+}
+
+/**
+ * Assert that `order` is a permutation of `ownIds` — exactly the same set, with
+ * no missing, extra, duplicate, or foreign entries. Guards a reorder, which
+ * must change sequence only, never membership.
+ */
+function assertPermutation(
+  presetName: string,
+  ownIds: string[],
+  order: string[]
+): void {
+  const ownSet = new Set(ownIds);
+  const seen = new Set<string>();
+  for (const id of order) {
+    if (!ownSet.has(id)) {
+      throw new Error(
+        `Reorder of preset '${presetName}' references '${id}', which is not one of its own plugins`
+      );
+    }
+    if (seen.has(id)) {
+      throw new Error(
+        `Reorder of preset '${presetName}' lists '${id}' more than once`
+      );
+    }
+    seen.add(id);
+  }
+  if (order.length !== ownIds.length) {
+    const missing = ownIds.filter((id) => !seen.has(id));
+    throw new Error(
+      `Reorder of preset '${presetName}' is missing own plugin(s): ${missing.join(", ")}`
+    );
+  }
+}
+
+/**
  * Edit a composed preset's composition fields — `imports`, `order`,
  * `deactivated`, `excluded` — in one shot. Preserves the preset's own
  * plugins, description, and any fields not passed in.

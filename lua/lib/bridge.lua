@@ -450,6 +450,40 @@ function bridge.update_composition(preset_name, fields, reabase_path)
   return result, nil
 end
 
+--- Set a plain preset's internal plugin order. Permutes the preset's own
+--- `plugins` list and its index-aligned `fxChainFile` to match `order`. Edits
+--- the preset YAML + JSON only — no track is involved (the plugin state already
+--- lives in the preset). `order` must be exactly the preset's own slotIds.
+--- This is the preset's canonical order (used standalone and as a composed
+--- preset's default when it imports without pinning these slots); a composed
+--- preset's own `order` is edited via bridge.update_composition instead.
+---@param preset_name string The plain preset to reorder
+---@param order string[] The preset's own slotIds in their new order
+---@param reabase_path string|nil Optional path to search from
+---@return table|nil result { success }
+---@return string|nil error
+function bridge.reorder_preset_plugins(preset_name, order, reabase_path)
+  local path_arg = reabase_path and (' -p "' .. reabase_path .. '"') or ""
+  local input = json.encode({
+    presetName = preset_name,
+    order = order,
+  })
+
+  local output, code = run_cli("reorder-preset-plugins" .. path_arg, input)
+  if not output or output == "" then
+    return nil, "Failed to run reabase reorder-preset-plugins"
+  end
+
+  local ok, result = pcall(json.decode, output)
+  if not ok then
+    return nil, "Failed to parse reorder-preset-plugins JSON: " .. tostring(result)
+  end
+  if result.error then
+    return nil, result.error
+  end
+  return result, nil
+end
+
 -- NOTE: bridge.unlink_override / bridge.link_as_override were removed — the
 -- override model is retired (the loader now rejects `override`/`extends`/etc.
 -- and the CLI no longer implements link/unlink-override). Composition handles

@@ -19,7 +19,7 @@ import { loadPresets } from "../preset/loader.js";
 import { resolvePreset } from "../preset/resolver.js";
 import { buildSlotSourceMap } from "../preset/membership.js";
 import { threeWayMerge } from "../merge/three-way.js";
-import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin } from "../preset/writer.js";
+import { updatePresetOwnPlugins, updateComposition, deletePresetOwnPlugin, reorderPresetOwnPlugins } from "../preset/writer.js";
 import { applyResolvedChainToTrack } from "./apply.js";
 import { buildSlotMap, serializeSlotMap, parseSlotMap, resolveSlotIds } from "../slot/map.js";
 import YAML from "yaml";
@@ -1315,6 +1315,48 @@ function scrubCompositionRef(
     }
   }
   return changed ? patch : null;
+}
+
+// ─── reorder-preset-plugins ──────────────────────────────────────
+
+export interface ReorderPresetPluginsInput {
+  /** The plain preset whose own plugins are being reordered. */
+  presetName: string;
+  /** The preset's own slotIds in their new internal order. Must be exactly the
+   *  set of the preset's own slotIds — no missing, extra, duplicate, or foreign
+   *  entries. */
+  order: string[];
+}
+
+export interface ReorderPresetPluginsOutput {
+  success: boolean;
+}
+
+/**
+ * Set a plain preset's internal plugin order directly, permuting its own
+ * `plugins` list and the index-aligned `fxChainFile` entries to match `order`.
+ * Operates purely on the preset files — no track is involved: the plugin state
+ * already lives in the preset, so reordering just permutes existing entries.
+ *
+ * This edits the preset's CANONICAL internal order — the order used when the
+ * preset is assigned to a track standalone, and the default order a composed
+ * preset inherits when it imports the preset without pinning those slots in its
+ * own `order`. A composed preset's own `order` is never touched here; edit that
+ * via `update-composition` instead. See `reorderPresetOwnPlugins` for the
+ * index-alignment and validation details.
+ */
+export function reorderPresetPlugins(
+  input: ReorderPresetPluginsInput,
+  reabasePath: string
+): ReorderPresetPluginsOutput {
+  const presetsDirectory = join(reabasePath, "presets");
+  const { presets } = loadPresets(presetsDirectory);
+  const definition = presets.get(input.presetName);
+  if (!definition) {
+    throw new Error(`Preset '${input.presetName}' not found`);
+  }
+  reorderPresetOwnPlugins(definition, input.order);
+  return { success: true };
 }
 
 // ─── blob-only change promotion (Bug 4) ──────────────────────────
