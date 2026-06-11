@@ -91,6 +91,7 @@ export function resolvePreset(
     name,
     sources: sourcesList.map((s) => ({
       name: s.source,
+      slotIds: s.fxChain.map((fp) => fp.slotId),
       deactivated: [...s.deactivated],
       excluded: [...s.excluded],
       order: [...s.order],

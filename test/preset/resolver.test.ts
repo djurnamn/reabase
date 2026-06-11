@@ -678,4 +678,48 @@ describe("resolvePreset — per-source composition", () => {
       order: [],
     });
   });
+
+  it("exposes each source's own plugins in canonical (plugins-list) order via `slotIds`", () => {
+    writeFxChainFile("fx/a.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+      { pluginName: "AU: kHs Filter (Kilohearts)", parameters: paramsB },
+    ]);
+    writeFxChainFile("fx/b.json", [
+      { pluginName: "AU: TOTape9 (Kilohearts)", parameters: paramsC },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["a", lp({
+        name: "a",
+        fxChainFile: "fx/a.json",
+        plugins: [{ id: "comp" }, { id: "filt" }],
+        // The composition's own `order` is the RESOLVED order, distinct from
+        // the canonical plugins-list order — `slotIds` must report the latter.
+        order: ["a/filt", "a/comp"],
+      })],
+      ["b", lp({ name: "b", fxChainFile: "fx/b.json", plugins: [{ id: "tape" }] })],
+      ["composed", lp({ name: "composed", imports: ["a", "b"] })],
+    ]);
+
+    const resolved = resolvePreset("composed", presets);
+    const byName = new Map(resolved.sources.map((s) => [s.name, s]));
+    // Canonical plugins-list order, NOT the source's own `order`.
+    expect(byName.get("a")!.slotIds).toEqual(["comp", "filt"]);
+    expect(byName.get("b")!.slotIds).toEqual(["tape"]);
+  });
+
+  it("reports an empty `slotIds` for a pure-composition container (no own plugins)", () => {
+    writeFxChainFile("fx/a.json", [
+      { pluginName: "AU: kHs Compressor (Kilohearts)", parameters: paramsA },
+    ]);
+    const presets = new Map<string, LoadedPreset>([
+      ["a", lp({ name: "a", fxChainFile: "fx/a.json", plugins: [{ id: "comp" }] })],
+      ["composed", lp({ name: "composed", imports: ["a"] })],
+    ]);
+
+    const resolved = resolvePreset("composed", presets);
+    // The container contributes no own plugins, so it isn't a source; only the
+    // import is — and it carries its own slotIds.
+    expect(resolved.sources.map((s) => s.name)).toEqual(["a"]);
+    expect(resolved.sources[0].slotIds).toEqual(["comp"]);
+  });
 });

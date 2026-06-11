@@ -142,6 +142,13 @@ export interface SourceComposition {
    *  and to color-code rows by `origin`. For the container source this equals
    *  the composed preset's own `name`. */
   name: string;
+  /** This source's own plugins in CANONICAL order — the order of its `plugins`
+   *  list / `fxChainFile`, NOT the composed resolution's order. This is what
+   *  `reorder-preset-plugins` permutes, so a source tab orders its own rows by
+   *  this to reflect a standalone reorder independently of whether the
+   *  composition pins those slots in its `order`. Empty when the source has no
+   *  own plugins (a pure-composition container). */
+  slotIds: string[];
   /** This source's own `deactivated`, verbatim. Empty when unset. */
   deactivated: string[];
   /** This source's own `excluded`, verbatim. Empty when unset. */

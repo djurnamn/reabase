@@ -242,6 +242,33 @@ describe("reorderPresetOwnPlugins", () => {
     expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["b", "c", "a"]);
   });
 
+  it("reflects the permutation in a composing preset's `sources[].slotIds`, even when the composition pins the order", () => {
+    writePreset("voice", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    // A composed preset that imports `voice` and PINS those slots in its own
+    // `order` — so the resolved chain is fixed by the composition, but each
+    // source tab must still order by the source's own canonical order.
+    writeFileSync(
+      join(tempDir, "comp.yaml"),
+      YAML.stringify({
+        name: "comp",
+        imports: ["voice"],
+        order: ["voice/a", "voice/b", "voice/c"],
+      }),
+      "utf-8"
+    );
+
+    reorderPresetOwnPlugins(loadPresets(tempDir).presets.get("voice")!, ["c", "a", "b"]);
+
+    const { presets } = loadPresets(tempDir);
+    const resolved = resolvePreset("comp", presets);
+    const voice = resolved.sources.find((s) => s.name === "voice")!;
+    // The source's canonical order reflects the reorder…
+    expect(voice.slotIds).toEqual(["c", "a", "b"]);
+    // …while the composition's pinned `order` keeps the resolved chain fixed —
+    // this is exactly the "jump back" the canonical `slotIds` lets the UI fix.
+    expect(resolved.fxChain.map((fx) => fx.slotId)).toEqual(["a", "b", "c"]);
+  });
+
   it("leaves composition fields untouched", () => {
     const safe = "voice";
     writeFileSync(
