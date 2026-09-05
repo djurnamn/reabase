@@ -214,6 +214,25 @@ handlers["update-composition"] = function(args)
   return result
 end
 
+-- Reorder a plain preset's own plugins (its internal/canonical order). Pure
+-- preset-file I/O — no track involved. `order` is the preset's own bare slotIds
+-- in their new sequence (an exact permutation of that preset's own slots).
+handlers["reorder-preset-plugins"] = function(args)
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+  if not args.presetName or args.presetName == "" then
+    error("No preset to reorder")
+  end
+
+  local result, err = bridge.reorder_preset_plugins(
+    args.presetName, args.order or {}, reabase_path
+  )
+  if not result then error(err or "reorder-preset-plugins failed") end
+  return result
+end
+
 -- ─── Message dispatch ────────────────────────────────────────────
 
 local function handle_message(raw)

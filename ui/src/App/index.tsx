@@ -83,6 +83,21 @@ export function App() {
     }
   }
 
+  // Reorder persists immediately (composed → update-composition order; source
+  // → reorder-preset-plugins). `presetName` is the tab's preset.
+  async function persistReorder(
+    command: "update-composition" | "reorder-preset-plugins",
+    presetName: string,
+    order: string[],
+  ) {
+    try {
+      await invoke(command, { presetName, order });
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const edits: TableEdits = {
     ownership,
     deactivation,
@@ -146,7 +161,7 @@ export function App() {
           <Tabs
             theme="folder"
             surfaceDirection="previous"
-            tabs={buildTabs(data, edits)}
+            tabs={buildTabs(data, edits, persistReorder)}
           />
         )}
       </div>
@@ -186,7 +201,15 @@ function presetOptions(data: InspectResult | null): SelectOption[] {
   }));
 }
 
-function buildTabs(data: InspectResult, edits: TableEdits): Tab[] {
+function buildTabs(
+  data: InspectResult,
+  edits: TableEdits,
+  onReorder: (
+    command: "update-composition" | "reorder-preset-plugins",
+    presetName: string,
+    order: string[],
+  ) => void,
+): Tab[] {
   const tabs: Tab[] = [];
 
   // Tab 1 IS the assigned preset's own container (its checkbox = "owned by the
@@ -203,6 +226,7 @@ function buildTabs(data: InspectResult, edits: TableEdits): Tab[] {
         ownerSource={data.preset ?? null}
         composedView
         edits={edits}
+        onReorder={onReorder}
       />
     ),
   });
@@ -220,6 +244,7 @@ function buildTabs(data: InspectResult, edits: TableEdits): Tab[] {
           ownerSource={sourceName}
           composedView={false}
           edits={edits}
+          onReorder={onReorder}
         />
       ),
     });

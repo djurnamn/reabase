@@ -46,11 +46,17 @@ export function PluginTable({
   ownerSource,
   composedView,
   edits,
+  onReorder,
 }: {
   data: InspectResult;
   ownerSource: string | null;
   composedView: boolean;
   edits: TableEdits;
+  onReorder: (
+    command: "update-composition" | "reorder-preset-plugins",
+    presetName: string,
+    order: string[],
+  ) => void;
 }) {
   const bem = useBem("PluginTable");
   const [showOthers, setShowOthers] = useState(false);
@@ -86,15 +92,28 @@ export function PluginTable({
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setItems((prev) => {
-      const from = prev.findIndex((r) => r.slot.slotId === active.id);
-      const to = prev.findIndex((r) => r.slot.slotId === over.id);
-      if (from === -1 || to === -1) return prev;
-      return arrayMove(prev, from, to);
-    });
-    // TODO (next): persist — composed view → composed `order`; import tab →
-    // that preset's internal order (see HANDOFF-PRESET-INTERNAL-ORDER.md).
+    if (!over || active.id === over.id || !ownerSource) return;
+    const from = items.findIndex((r) => r.slot.slotId === active.id);
+    const to = items.findIndex((r) => r.slot.slotId === over.id);
+    if (from === -1 || to === -1) return;
+    const newItems = arrayMove(items, from, to);
+    setItems(newItems); // optimistic; the refresh confirms it
+
+    // Persist by committed (inspect) owner — the order references slots by
+    // their current source. Composed view → the composed preset's
+    // `<source>/<slotId>` order (owned slots, incl. excluded); source tab →
+    // that preset's own bare slotIds.
+    if (composedView) {
+      const order = newItems
+        .filter((r) => inspectOwner(r.slot) != null)
+        .map((r) => `${inspectOwner(r.slot)}/${r.slot.slotId}`);
+      onReorder("update-composition", ownerSource, order);
+    } else {
+      const order = newItems
+        .filter((r) => inspectOwner(r.slot) === ownerSource)
+        .map((r) => r.slot.slotId);
+      onReorder("reorder-preset-plugins", ownerSource, order);
+    }
   }
 
   return (

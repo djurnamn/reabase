@@ -46,6 +46,10 @@ export interface PresetSummary {
  */
 export interface SourceComposition {
   name: string;
+  /** This source's own plugins in CANONICAL order (its `plugins`/`fxChainFile`
+   *  order — what `reorder-preset-plugins` permutes), so a source tab can order
+   *  its own rows independently of the composed resolution. */
+  slotIds: string[];
   deactivated: string[];
   excluded: string[];
   order: string[];

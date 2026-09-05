@@ -199,9 +199,24 @@ export function buildRows(
     excludedBaseline: false,
   }));
   const here = rows.filter((r) => r.owner === ownerSource);
+
+  // This source's own plugins, in the SOURCE's canonical order (so a standalone
+  // reorder reflects here regardless of how the composition orders them);
+  // brought-over plugins follow at the bottom.
+  const canonical = data.sources.find((s) => s.name === ownerSource)?.slotIds ?? [];
+  const canonicalIndex = new Map(canonical.map((id, i) => [id, i]));
+  const originallyHere = here
+    .filter((r) => inspectOwner(r.slot) === ownerSource)
+    .sort(
+      (a, b) =>
+        (canonicalIndex.get(a.slot.slotId) ?? 0) -
+        (canonicalIndex.get(b.slot.slotId) ?? 0),
+    );
+  const broughtOver = here.filter((r) => inspectOwner(r.slot) !== ownerSource);
+
   return [
-    ...here.filter((r) => inspectOwner(r.slot) === ownerSource),
-    ...here.filter((r) => inspectOwner(r.slot) !== ownerSource),
+    ...originallyHere,
+    ...broughtOver,
     ...rows.filter((r) => r.owner == null),
     ...(showOthers ? rows.filter((r) => r.owner != null && r.owner !== ownerSource) : []),
   ];
