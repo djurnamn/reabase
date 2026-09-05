@@ -62,6 +62,30 @@ export interface ExcludedSlot {
   position: number;
 }
 
+/** One plugin's three-way-merge action (the subset the row status reads). */
+export interface MergeAction {
+  type:
+    | "keep_base"
+    | "keep_local"
+    | "use_new_base"
+    | "merge_params"
+    | "add_base"
+    | "add_local"
+    | "remove"
+    | "remove_local"
+    | "conflict";
+  fx?: FxSlot;
+  /** Present on `conflict`. */
+  local?: FxSlot;
+  /** Present on `remove`. */
+  slotId?: string;
+}
+
+export interface MergeResult {
+  actions: MergeAction[];
+  hasConflicts: boolean;
+}
+
 export interface InspectResult {
   trackName?: string;
   trackGuid?: string;
@@ -74,6 +98,9 @@ export interface InspectResult {
   /** Excluded slots (not in the resolved chain) with their position, so the UI
    *  can render them grayed-in-place and offer un-exclude. */
   excludedChain: ExcludedSlot[];
+  /** Three-way-merge result — drives per-plugin status. Null when no preset/
+   *  no baseline to compare against. */
+  merge: MergeResult | null;
   /** Source presets contributing to the resolved chain, in resolution order.
    *  Each carries its OWN composition fields (see `SourceComposition`) so a
    *  source tab can render/edit its standalone state independently. */

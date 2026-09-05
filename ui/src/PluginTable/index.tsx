@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import useBem from "use-bem";
 import { Checkbox, Typography } from "djui";
-import { Icon, GripVertical, Power, X } from "@djui/lucide";
+import { Icon, GripVertical, Power, RotateCcw, X } from "@djui/lucide";
 import { useConfirm } from "@djui/reaper-webview";
 import {
   DndContext,
@@ -33,6 +33,7 @@ import {
   type OwnershipRow,
 } from "../ownership";
 import type { TableEdits } from "../useStagedEdits";
+import { rowStatusBySlot, ROW_STATUS_LABEL, type RowStatus } from "../status";
 import "./index.scss";
 
 /**
@@ -46,12 +47,14 @@ export function PluginTable({
   ownerSource,
   composedView,
   edits,
+  onRevert,
   onReorder,
 }: {
   data: InspectResult;
   ownerSource: string | null;
   composedView: boolean;
   edits: TableEdits;
+  onRevert: (slotId: string) => void;
   onReorder: (
     command: "update-composition" | "reorder-preset-plugins",
     presetName: string,
@@ -62,6 +65,7 @@ export function PluginTable({
   const [showOthers, setShowOthers] = useState(false);
   const [hideExcluded, setHideExcluded] = useState(false);
   const sources = useMemo(() => importSources(data), [data]);
+  const statusBySlot = useMemo(() => rowStatusBySlot(data.merge), [data.merge]);
 
   const rows = useMemo(() => {
     const built = buildRows(data, ownerSource, composedView, edits.ownership, showOthers);
@@ -159,7 +163,9 @@ export function PluginTable({
                   ownerSource={ownerSource}
                   composedView={composedView}
                   sources={sources}
+                  status={statusBySlot.get(row.slot.slotId)}
                   edits={edits}
+                  onRevert={onRevert}
                 />
               ))}
             </ul>
@@ -176,14 +182,18 @@ function PluginRow({
   ownerSource,
   composedView,
   sources,
+  status,
   edits,
+  onRevert,
 }: {
   row: OwnershipRow;
   data: InspectResult;
   ownerSource: string | null;
   composedView: boolean;
   sources: string[];
+  status?: RowStatus;
   edits: TableEdits;
+  onRevert: (slotId: string) => void;
 }) {
   const bem = useBem("PluginTable");
   const confirm = useConfirm();
@@ -275,7 +285,27 @@ function PluginRow({
       {modified && (
         <span className={bem("modified-dot")} title="Modified — save to commit" />
       )}
+      {status && (
+        <span
+          className={bem("status-dot", status)}
+          title={ROW_STATUS_LABEL[status]}
+        />
+      )}
       {slot.pluginType && <span className={bem("type")}>{slot.pluginType}</span>}
+
+      {/* Revert this plugin to its preset state. Immediate (mutates the live
+          FX), shown only when it diverges from the preset. */}
+      {owner != null && status && (
+        <button
+          type="button"
+          className={bem("revert")}
+          aria-label="Revert to preset"
+          title="Revert to preset"
+          onClick={() => onRevert(slot.slotId)}
+        >
+          <Icon icon={RotateCcw} size={0.62} />
+        </button>
+      )}
 
       {showDeactivate && ownerSource != null && (
         <button

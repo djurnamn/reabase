@@ -138,6 +138,110 @@ local function capture_fx_parameters(track)
   return result
 end
 
+local function set_track_chunk(track, chunk)
+  return reaper.SetTrackStateChunk(track, chunk, false)
+end
+
+--- Map slotId → preset parameters from a resolved chain.
+local function preset_params_by_slot(resolved_chain)
+  local map = {}
+  if resolved_chain then
+    for _, fx in ipairs(resolved_chain) do
+      if fx.slotId then map[fx.slotId] = fx.parameters end
+    end
+  end
+  return map
+end
+
+--- Capture current FX params, but substitute the preset's params for every
+--- preset-managed slot. Used after a revert so the snapshot baseline reflects
+--- the clean preset state — the reverted slot then resolves to keep_base on the
+--- next inspect, while other local tweaks stay keep_local against this baseline.
+local function capture_fx_parameters_as_preset_baseline(track, resolved_chain, current_chain)
+  local fx_parameters = capture_fx_parameters(track)
+  if not resolved_chain or not current_chain then return fx_parameters end
+  local preset_params = preset_params_by_slot(resolved_chain)
+  for idx, fx in ipairs(current_chain) do
+    if fx.slotId then
+      local target = preset_params[fx.slotId]
+      if target then fx_parameters[idx] = target end
+    end
+  end
+  return fx_parameters
+end
+
+--- Create a temp track loaded with `plugins` (including blob state) so a full
+--- plugin state can be restored via CopyToTrack. Uses the CLI to format the
+--- chunk so blobs round-trip correctly. Returns the temp track or nil.
+local function create_temp_track_with_plugins(plugins)
+  local before = reaper.CountTracks(0)
+  reaper.InsertTrackAtIndex(before, false)
+  local temp_track = reaper.GetTrack(0, before)
+  if not temp_track then return nil end
+
+  local empty_chunk = get_track_chunk(temp_track)
+  if not empty_chunk then
+    reaper.DeleteTrack(temp_track)
+    return nil
+  end
+
+  local apply_result = bridge.apply_chunk(empty_chunk, plugins)
+  if not apply_result then
+    reaper.DeleteTrack(temp_track)
+    return nil
+  end
+
+  set_track_chunk(temp_track, apply_result.modifiedChunk)
+  return temp_track
+end
+
+--- Restore one plugin's full state (params + state blob) via a temp track +
+--- CopyToTrack — for plugins whose params alone don't capture their state
+--- (e.g. RS5K samples, modular plugins). Synchronous (the bridge is
+--- request/response, so no reaper.defer).
+local function restore_plugin_with_blob(track, plugin_index, fx)
+  local temp_track = create_temp_track_with_plugins({ fx })
+  if not temp_track then return end
+
+  if fx.parameters then
+    local num_params = reaper.TrackFX_GetNumParams(temp_track, 0)
+    for key, pv in pairs(fx.parameters) do
+      local pi = tonumber(key)
+      if pi and pi < num_params then
+        reaper.TrackFX_SetParam(temp_track, 0, pi, pv.value)
+      end
+    end
+  end
+
+  reaper.TrackFX_Delete(track, plugin_index)
+  reaper.TrackFX_CopyToTrack(temp_track, 0, track, plugin_index, true)
+  reaper.DeleteTrack(temp_track)
+end
+
+--- Run `mutate` (which may freely churn the live track — temp tracks,
+--- CopyToTrack, repeated chunk swaps, snapshot file writes) and collapse the
+--- whole thing into ONE clean REAPER undo step. Native undo is corrupted by
+--- temp-track create+delete and multiple SetTrackStateChunk calls inside a
+--- block; so instead we run the mutation OUTSIDE any block, capture the
+--- resulting chunk, restore the track's pre-mutation chunk, and re-apply the
+--- result with a single SetTrackStateChunk inside the block. The block then
+--- holds exactly one swap on one track → Cmd-Z reverts the FX chain + preset
+--- binding faithfully. (Orphaned .reabase snapshot files from the mutation are
+--- a separate prune concern and don't affect the user-visible undo.) On error
+--- the track is restored to its original chunk before the failure is re-raised.
+local function as_single_undo(track, label, mutate)
+  local original = get_track_chunk(track)
+  reaper.PreventUIRefresh(1)
+  local ok, err = pcall(mutate)
+  local final = get_track_chunk(track)
+  if original then set_track_chunk(track, original) end -- true before-state
+  reaper.PreventUIRefresh(-1)
+  if not ok then error(err) end
+  reaper.Undo_BeginBlock()
+  if final then set_track_chunk(track, final) end
+  reaper.Undo_EndBlock(label, -1)
+end
+
 -- ─── Action handlers ─────────────────────────────────────────────
 -- One entry per `window.reaper.invoke(action, args)` the UI can call. A
 -- handler returns a Lua table (sent back as the resolved JSON) or raises an
@@ -212,6 +316,73 @@ handlers["update-composition"] = function(args)
   local result, err = bridge.update_composition(args.presetName, args, reabase_path)
   if not result then error(err or "update-composition failed") end
   return result
+end
+
+-- Revert one plugin to its preset-defined state. IMMEDIATE (mutates the live
+-- FX), not staged: applies preset params via TrackFX_SetParam, falls back to a
+-- full blob restore if params don't capture the state, then re-snapshots to the
+-- clean preset baseline so the row stops reporting modified.
+handlers["revert-plugin"] = function(args)
+  local track = reaper.GetSelectedTrack(0, 0)
+  if not track then error("No track selected") end
+
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+  if not args.slotId then error("No slotId to revert") end
+
+  local chunk = get_track_chunk(track)
+  if not chunk then error("Could not read the track's state chunk") end
+
+  local result, err = bridge.revert_plugin(chunk, args.slotId, reabase_path)
+  if not result then error(err or "revert-plugin failed") end
+
+  as_single_undo(track, "reabase: revert plugin '" .. tostring(args.slotId) .. "'", function()
+    -- Step 1: parameter revert (cheap, no FX reload).
+    if result.pluginIndex ~= nil and result.parameterMap then
+      for key, pv in pairs(result.parameterMap) do
+        local pi = tonumber(key)
+        if pi then reaper.TrackFX_SetParam(track, result.pluginIndex, pi, pv.value) end
+      end
+    end
+
+    -- Step 2: if a state blob is involved and params didn't fully restore it,
+    -- do a full blob restore via temp track.
+    if result.stateBlob and result.pluginName then
+      local updated_chunk = get_track_chunk(track)
+      local current = updated_chunk
+        and bridge.revert_plugin(updated_chunk, args.slotId, reabase_path)
+      if current and current.stateBlob ~= result.stateBlob then
+        restore_plugin_with_blob(track, result.pluginIndex, {
+          pluginName = result.pluginName,
+          pluginType = result.pluginType,
+          pluginParams = result.pluginParams,
+          stateBlob = result.stateBlob,
+          parameters = result.parameterMap,
+        })
+      end
+    end
+
+    -- Step 3: re-snapshot to the clean preset baseline (re-inspect to get the
+    -- resolved/current chains). Keeps the reverted slot at keep_base and other
+    -- local tweaks at keep_local next inspect.
+    local reaper_chunk = get_track_chunk(track)
+    local fx_params = capture_fx_parameters(track)
+    local inspect = reaper_chunk
+      and bridge.inspect_track(reaper_chunk, reabase_path, fx_params)
+    if inspect and inspect.preset and inspect.resolvedChain then
+      local snap_params = capture_fx_parameters_as_preset_baseline(
+        track, inspect.resolvedChain, inspect.currentChain
+      )
+      local snap_chunk = bridge.snapshot(
+        reaper_chunk, inspect.preset, reabase_path, snap_params
+      )
+      if snap_chunk then set_track_chunk(track, snap_chunk) end
+    end
+  end)
+
+  return { success = true }
 end
 
 -- Reorder a plain preset's own plugins (its internal/canonical order). Pure

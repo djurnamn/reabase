@@ -83,6 +83,16 @@ export function App() {
     }
   }
 
+  // Revert is IMMEDIATE (mutates the live FX), not staged.
+  async function revert(slotId: string) {
+    try {
+      await invoke("revert-plugin", { slotId });
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   // Reorder persists immediately (composed → update-composition order; source
   // → reorder-preset-plugins). `presetName` is the tab's preset.
   async function persistReorder(
@@ -161,7 +171,7 @@ export function App() {
           <Tabs
             theme="folder"
             surfaceDirection="previous"
-            tabs={buildTabs(data, edits, persistReorder)}
+            tabs={buildTabs(data, edits, revert, persistReorder)}
           />
         )}
       </div>
@@ -204,6 +214,7 @@ function presetOptions(data: InspectResult | null): SelectOption[] {
 function buildTabs(
   data: InspectResult,
   edits: TableEdits,
+  onRevert: (slotId: string) => void,
   onReorder: (
     command: "update-composition" | "reorder-preset-plugins",
     presetName: string,
@@ -226,6 +237,7 @@ function buildTabs(
         ownerSource={data.preset ?? null}
         composedView
         edits={edits}
+        onRevert={onRevert}
         onReorder={onReorder}
       />
     ),
@@ -244,6 +256,7 @@ function buildTabs(
           ownerSource={sourceName}
           composedView={false}
           edits={edits}
+          onRevert={onRevert}
           onReorder={onReorder}
         />
       ),
