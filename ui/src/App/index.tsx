@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import useBem from "use-bem";
-import { Button, Select, Spinner, Tabs, Typography } from "djui";
+import { Button, Modal, Select, Spinner, Tabs, Typography } from "djui";
 import type { SelectOption, Tab } from "djui";
 import { Icon, Menu } from "@djui/lucide";
-import { useInvoke, toast } from "@djui/reaper-webview";
+import { useInvoke, useConfirm, toast } from "@djui/reaper-webview";
 import { Brand } from "../Brand";
 import { StatusPill } from "../StatusPill";
 import { PluginTable } from "../PluginTable";
@@ -38,7 +38,11 @@ export function App() {
     count,
   } = useStagedEdits();
   const invoke = useInvoke();
+  const confirm = useConfirm();
   const [saving, setSaving] = useState(false);
+  // The target preset awaiting a Merge/Replace choice (assign onto a track that
+  // already has non-preset plugins).
+  const [pendingAssign, setPendingAssign] = useState<string | null>(null);
 
   // Drop staged edits only when the SELECTED TRACK changes — not on every
   // inspect (the chunk-hash poll re-inspects the same track constantly; clearing
@@ -81,6 +85,68 @@ export function App() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function runPresetAction(fn: () => Promise<unknown>) {
+    try {
+      await fn();
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // Dropdown change routes to assign / unassign / switch (no-op if unchanged).
+  // Confirms before losing uncommitted work; everything is undoable (Cmd-Z).
+  async function changePreset(target: string) {
+    if (!data) return;
+    const current = data.preset ?? "";
+    if (target === current) return; // no-op
+
+    const hasUncommitted =
+      data.status === "modified" || data.status === "conflict" || count > 0;
+
+    if (target === "") {
+      if (hasUncommitted) {
+        const ok = await confirm({
+          title: "Unassign preset?",
+          description:
+            "Uncommitted changes to this preset's plugins will be lost. Your other track plugins stay.",
+          confirmLabel: "Unassign",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      await runPresetAction(() => invoke("unassign-preset", {}));
+    } else if (current !== "") {
+      // Switch: keep local additions, drop the old preset (merge mode).
+      if (hasUncommitted) {
+        const ok = await confirm({
+          title: `Switch to "${target}"?`,
+          description: `Uncommitted changes to "${current}" will be lost. Your local additions stay.`,
+          confirmLabel: "Switch",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      await runPresetAction(() =>
+        invoke("assign-preset", { preset: target, mode: "merge" }),
+      );
+    } else if (data.currentChain.length > 0) {
+      // Assign onto a track that already has (non-preset) plugins — ask.
+      setPendingAssign(target);
+    } else {
+      await runPresetAction(() =>
+        invoke("assign-preset", { preset: target, mode: "replace" }),
+      );
+    }
+  }
+
+  function resolveAssign(mode: "merge" | "replace" | null) {
+    const target = pendingAssign;
+    setPendingAssign(null);
+    if (!target || !mode) return;
+    void runPresetAction(() => invoke("assign-preset", { preset: target, mode }));
   }
 
   // Revert is IMMEDIATE (mutates the live FX), not staged.
@@ -147,14 +213,11 @@ export function App() {
           <Typography variant="label">preset</Typography>
           <Select
             className={bem("preset-select")}
-            placeholder="Select preset"
+            size={1}
             value={data?.preset ?? ""}
             options={presetOptions(data)}
-            onChange={() => {
-              /* TODO: set-preset */
-            }}
+            onChange={(e) => void changePreset(e.currentTarget.value)}
           />
-          <Button label={data?.preset ? "Unassign" : "Assign"} variant="soft" />
           {/* TODO: popout — duplicate, delete. */}
           <Button label="⋯" variant="soft" />
         </div>
@@ -198,17 +261,55 @@ export function App() {
           </div>
         </div>
       )}
+
+      {pendingAssign && (
+        <Modal open onClose={() => setPendingAssign(null)}>
+          <div className={bem("assign-dialog")}>
+            <Typography variant="heading" tag="h2">
+              Assign "{pendingAssign}"
+            </Typography>
+            <Typography variant="body" tag="p">
+              This track already has {data?.currentChain.length} plugin
+              {(data?.currentChain.length ?? 0) > 1 ? "s" : ""}. Keep them
+              alongside the preset, or replace them? Either way it's undoable
+              (Cmd-Z).
+            </Typography>
+            <div className={bem("assign-actions")}>
+              <Button
+                label="Cancel"
+                variant="soft"
+                onClick={() => setPendingAssign(null)}
+              />
+              <Button
+                label="Replace"
+                variant="soft"
+                color="context-negative"
+                onClick={() => resolveAssign("replace")}
+              />
+              <Button
+                label="Keep both"
+                variant="solid"
+                color="accent-primary"
+                onClick={() => resolveAssign("merge")}
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
 function presetOptions(data: InspectResult | null): SelectOption[] {
-  if (!data) return [];
-  // Flat for now — grouping needs <optgroup> (djui gap).
-  return data.presets.map((preset) => ({
-    value: preset.name,
-    label: preset.name,
-  }));
+  // Picking "(no preset)" (value "") unassigns. Flat for now — grouping needs
+  // <optgroup> (djui gap).
+  const options: SelectOption[] = [{ value: "", label: "(no preset)" }];
+  if (data) {
+    for (const preset of data.presets) {
+      options.push({ value: preset.name, label: preset.name });
+    }
+  }
+  return options;
 }
 
 function buildTabs(

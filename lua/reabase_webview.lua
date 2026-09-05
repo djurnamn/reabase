@@ -142,6 +142,23 @@ local function set_track_chunk(track, chunk)
   return reaper.SetTrackStateChunk(track, chunk, false)
 end
 
+--- Apply parameter maps (one per FX) to the live FX via TrackFX_SetParam.
+local function set_fx_parameters(track, parameter_maps)
+  local fx_count = reaper.TrackFX_GetCount(track)
+  for i = 0, fx_count - 1 do
+    local params = parameter_maps[i + 1]
+    if params then
+      local num_params = reaper.TrackFX_GetNumParams(track, i)
+      for key, pv in pairs(params) do
+        local pi = tonumber(key)
+        if pi and pi < num_params then
+          reaper.TrackFX_SetParam(track, i, pi, pv.value)
+        end
+      end
+    end
+  end
+end
+
 --- Map slotId → preset parameters from a resolved chain.
 local function preset_params_by_slot(resolved_chain)
   local map = {}
@@ -216,6 +233,73 @@ local function restore_plugin_with_blob(track, plugin_index, fx)
   reaper.TrackFX_Delete(track, plugin_index)
   reaper.TrackFX_CopyToTrack(temp_track, 0, track, plugin_index, true)
   reaper.DeleteTrack(temp_track)
+end
+
+--- Delete the preset-MANAGED plugins (those in the resolved chain) from the
+--- track, keeping local/loose ones. `inspect` is a prior inspect result.
+local function remove_managed_plugins(track, inspect)
+  if not (inspect and inspect.resolvedChain and inspect.currentChain) then return end
+  local managed = {}
+  for _, fx in ipairs(inspect.resolvedChain) do
+    if fx.slotId then managed[fx.slotId] = true end
+  end
+  -- currentChain[i] is the FX at 0-based index i-1, in chain order.
+  local remove_indices = {}
+  for i, fx in ipairs(inspect.currentChain) do
+    if fx.slotId and managed[fx.slotId] then
+      remove_indices[#remove_indices + 1] = i - 1
+    end
+  end
+  table.sort(remove_indices, function(a, b) return a > b end) -- reverse, indices stay valid
+  for _, idx in ipairs(remove_indices) do
+    reaper.TrackFX_Delete(track, idx)
+  end
+end
+
+--- Merge insert: add the new preset's plugins that aren't on the track yet
+--- (`add_base` in the merge) ON TOP of the existing FX (before the local
+--- plugins), preserving the existing plugins' full state. Re-snapshots. Assumes
+--- the preset is already set and the track was snapshotted with
+--- preserveLocalSlotIds so existing plugins read as local and the preset's read
+--- as add_base.
+local function merge_insert_preset_plugins(track, preset, reabase_path)
+  local inspect = bridge.inspect_track(
+    get_track_chunk(track), reabase_path, capture_fx_parameters(track)
+  )
+  if not (inspect and inspect.merge and inspect.merge.actions) then return end
+
+  local to_add = {}
+  for _, action in ipairs(inspect.merge.actions) do
+    if action.type == "add_base" and action.fx then
+      to_add[#to_add + 1] = action.fx
+    end
+  end
+  if #to_add == 0 then return end
+
+  local temp = create_temp_track_with_plugins(to_add)
+  if not temp then return end
+
+  -- Apply params to the temp FX (safety net), then copy each ON TOP (before the
+  -- existing local plugins) so the chain order matches reabase's composed view.
+  for i = 0, #to_add - 1 do
+    local fx = to_add[i + 1]
+    if fx.parameters then
+      local np = reaper.TrackFX_GetNumParams(temp, i)
+      for key, pv in pairs(fx.parameters) do
+        local pi = tonumber(key)
+        if pi and pi < np then reaper.TrackFX_SetParam(temp, i, pi, pv.value) end
+      end
+    end
+  end
+  for i = 0, #to_add - 1 do
+    reaper.TrackFX_CopyToTrack(temp, i, track, i, false)
+  end
+  reaper.DeleteTrack(temp)
+
+  local resnap = bridge.snapshot(
+    get_track_chunk(track), preset, reabase_path, capture_fx_parameters(track)
+  )
+  if resnap then set_track_chunk(track, resnap) end
 end
 
 --- Run `mutate` (which may freely churn the live track — temp tracks,
@@ -402,6 +486,99 @@ handlers["reorder-preset-plugins"] = function(args)
   )
   if not result then error(err or "reorder-preset-plugins failed") end
   return result
+end
+
+-- Assign a preset to the track. `mode`:
+--   "replace" (default) — overwrite the FX chain with the preset's resolved
+--                         chain.
+--   "merge"             — keep the track's local plugins, add the preset's
+--                         plugins AFTER them. When switching from another
+--                         preset, that preset's managed plugins are removed
+--                         first (so only local additions survive).
+-- One undo block, so Cmd-Z restores the prior track state.
+handlers["assign-preset"] = function(args)
+  local track = reaper.GetSelectedTrack(0, 0)
+  if not track then error("No track selected") end
+
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+  if not args.preset or args.preset == "" then error("No preset to assign") end
+
+  local mode = args.mode == "merge" and "merge" or "replace"
+
+  as_single_undo(track, "reabase: assign preset '" .. args.preset .. "'", function()
+    if mode == "merge" then
+      -- Switching: drop the current preset's managed plugins, keep local ones.
+      -- (A fresh assign has no current preset, so nothing is removed.)
+      local cur = bridge.inspect_track(
+        get_track_chunk(track), reabase_path, capture_fx_parameters(track)
+      )
+      if cur and cur.preset and cur.preset ~= "" then
+        remove_managed_plugins(track, cur)
+      end
+
+      local with_preset = bridge.set_preset(get_track_chunk(track), args.preset)
+      if with_preset then set_track_chunk(track, with_preset) end
+
+      -- preserveLocalSlotIds: remaining plugins read as local, the new preset's
+      -- as add_base — which merge_insert then adds on top of the existing FX.
+      local snap = bridge.snapshot(
+        get_track_chunk(track), args.preset, reabase_path,
+        capture_fx_parameters(track), true
+      )
+      if snap then set_track_chunk(track, snap) end
+
+      merge_insert_preset_plugins(track, args.preset, reabase_path)
+    else
+      local with_preset, err = bridge.set_preset(get_track_chunk(track), args.preset)
+      if not with_preset then error(err or "set-preset failed") end
+      set_track_chunk(track, with_preset)
+
+      local inspect = bridge.inspect_track(
+        get_track_chunk(track), reabase_path, capture_fx_parameters(track)
+      )
+      if inspect and inspect.resolvedChain then
+        local apply = bridge.apply_chunk(get_track_chunk(track), inspect.resolvedChain)
+        if apply then
+          set_track_chunk(track, apply.modifiedChunk)
+          if apply.parameterMaps then set_fx_parameters(track, apply.parameterMaps) end
+          local snap = bridge.snapshot(
+            get_track_chunk(track), args.preset, reabase_path, capture_fx_parameters(track)
+          )
+          if snap then set_track_chunk(track, snap) end
+        end
+      end
+    end
+  end)
+
+  return { success = true }
+end
+
+-- Unassign: remove the preset-MANAGED plugins, keep local/loose ones, clear the
+-- binding. Undoable. Confirm-if-uncommitted is handled in the UI. NOTE: the
+-- track's snapshot file isn't pruned — stale-snapshot cleanup is a separate
+-- backend concern.
+handlers["unassign-preset"] = function(args)
+  local track = reaper.GetSelectedTrack(0, 0)
+  if not track then error("No track selected") end
+
+  local reabase_path = find_reabase_root()
+  if not reabase_path then
+    error("No .reabase/ project found for the current REAPER project")
+  end
+
+  local chunk = get_track_chunk(track)
+  if not chunk then error("Could not read the track's state chunk") end
+  local inspect = bridge.inspect_track(chunk, reabase_path, capture_fx_parameters(track))
+
+  as_single_undo(track, "reabase: unassign preset", function()
+    remove_managed_plugins(track, inspect)
+    local cleared = bridge.set_preset(get_track_chunk(track), "")
+    if cleared then set_track_chunk(track, cleared) end
+  end)
+  return { success = true }
 end
 
 -- ─── Message dispatch ────────────────────────────────────────────
