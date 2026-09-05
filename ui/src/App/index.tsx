@@ -10,9 +10,10 @@ import { PluginTable } from "../PluginTable";
 import { useInspect } from "../useInspect";
 import { useStagedEdits, type TableEdits } from "../useStagedEdits";
 import {
-  deactivatedPayload,
+  deactivatedListForPreset,
   excludedPayload,
   ownershipPayload,
+  presetsWithStagedDeactivation,
 } from "../ownership";
 import type { InspectResult } from "../bridge";
 import "./index.scss";
@@ -53,14 +54,22 @@ export function App() {
       if (ownership.size > 0) {
         await invoke("update-presets", ownershipPayload(data, ownership));
       }
-      // deactivation + exclusion are both composition fields on the composed
-      // preset — commit them in one update-composition call.
-      if ((deactivation.size > 0 || exclusion.size > 0) && data.preset) {
-        const fields: Record<string, unknown> = { presetName: data.preset };
-        if (deactivation.size > 0) {
-          fields.deactivated = deactivatedPayload(data, ownership, deactivation);
+      // Composition edits per preset: deactivation is scoped (composed preset
+      // and/or individual sources); exclusion is composed-scope only.
+      const deactPresets = presetsWithStagedDeactivation(deactivation);
+      const compositionPresets = new Set(deactPresets);
+      if (exclusion.size > 0 && data.preset) compositionPresets.add(data.preset);
+      for (const preset of compositionPresets) {
+        const fields: Record<string, unknown> = { presetName: preset };
+        if (deactPresets.includes(preset)) {
+          fields.deactivated = deactivatedListForPreset(
+            data,
+            preset,
+            ownership,
+            deactivation,
+          );
         }
-        if (exclusion.size > 0) {
+        if (preset === data.preset && exclusion.size > 0) {
           fields.excluded = excludedPayload(data, ownership, exclusion);
         }
         await invoke("update-composition", fields);

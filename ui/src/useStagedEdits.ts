@@ -1,9 +1,10 @@
 import { useCallback, useState } from "react";
-import type {
-  Owner,
-  StagedDeactivation,
-  StagedExclusion,
-  StagedOwnership,
+import {
+  deactivationKey,
+  type Owner,
+  type StagedDeactivation,
+  type StagedExclusion,
+  type StagedOwnership,
 } from "./ownership";
 
 /** The staged state + stagers the plugin table needs (not clear/count). */
@@ -12,7 +13,13 @@ export interface TableEdits {
   deactivation: StagedDeactivation;
   exclusion: StagedExclusion;
   stageOwnership: (slotId: string, owner: Owner, original: Owner) => void;
-  stageDeactivation: (slotId: string, value: boolean, original: boolean) => void;
+  /** Deactivation is scoped to a preset (composed preset, or a source). */
+  stageDeactivation: (
+    preset: string,
+    slotId: string,
+    value: boolean,
+    original: boolean,
+  ) => void;
   stageExclusion: (slotId: string, value: boolean, original: boolean) => void;
 }
 
@@ -35,8 +42,10 @@ export function useStagedEdits() {
   );
 
   const stageDeactivation = useCallback(
-    (slotId: string, value: boolean, original: boolean) => {
-      setDeactivation((prev) => toggleMap(prev, slotId, value, original));
+    (preset: string, slotId: string, value: boolean, original: boolean) => {
+      setDeactivation((prev) =>
+        toggleMap(prev, deactivationKey(preset, slotId), value, original),
+      );
     },
     [],
   );

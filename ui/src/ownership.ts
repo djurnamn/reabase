@@ -1,5 +1,5 @@
 import type { DjuiColor } from "djui";
-import type { FxSlot, InspectResult } from "./bridge";
+import type { FxSlot, InspectResult, SourceComposition } from "./bridge";
 
 /**
  * Ownership + composition model for the plugin table. A slot is owned by exactly
@@ -36,19 +36,56 @@ export function effectiveOwner(slot: FxSlot, staged: StagedOwnership): Owner {
     : inspectOwner(slot);
 }
 
-// ─── Deactivation ──────────────────────────────────────────────────
+// ─── Deactivation (scoped to the tab's preset) ─────────────────────
+//
+// The composed view edits the composed preset's `deactivated` (reflected in
+// `slot.bypassed`); a source tab edits THAT source's own `deactivated` (from its
+// `SourceComposition`). They're independent state for the same slot, so the
+// staged map is keyed by `<preset>::<slotId>`.
 
-export function inspectDeactivated(slot: FxSlot): boolean {
-  return !!slot.bypassed;
+export function deactivationKey(preset: string, slotId: string): string {
+  return `${preset}::${slotId}`;
 }
 
-export function effectiveDeactivated(
+function sourceComposition(
+  data: InspectResult,
+  name: string,
+): SourceComposition | undefined {
+  return data.sources.find((s) => s.name === name);
+}
+
+/** Committed deactivate state of `slot` in `targetPreset`'s scope. */
+export function inspectDeactivatedFor(
+  data: InspectResult,
   slot: FxSlot,
+  targetPreset: string,
+): boolean {
+  if (targetPreset === data.preset) return !!slot.bypassed; // composed scope
+  const comp = sourceComposition(data, targetPreset);
+  return comp
+    ? comp.deactivated.includes(`${targetPreset}/${slot.slotId}`)
+    : false;
+}
+
+export function effectiveDeactivatedFor(
+  data: InspectResult,
+  slot: FxSlot,
+  targetPreset: string,
   staged: StagedDeactivation,
 ): boolean {
-  return staged.has(slot.slotId)
-    ? (staged.get(slot.slotId) as boolean)
-    : inspectDeactivated(slot);
+  const key = deactivationKey(targetPreset, slot.slotId);
+  return staged.has(key)
+    ? (staged.get(key) as boolean)
+    : inspectDeactivatedFor(data, slot, targetPreset);
+}
+
+/** Presets that have any staged deactivation edit. */
+export function presetsWithStagedDeactivation(
+  staged: StagedDeactivation,
+): string[] {
+  const presets = new Set<string>();
+  for (const key of staged.keys()) presets.add(key.slice(0, key.indexOf("::")));
+  return [...presets];
 }
 
 // ─── Exclusion ─────────────────────────────────────────────────────
@@ -188,17 +225,31 @@ export function ownershipPayload(
   return { ownership, released };
 }
 
-/** The composed preset's full `deactivated` list as `<source>/<slotId>`. */
-export function deactivatedPayload(
+/**
+ * A preset's full `deactivated` list as `<source>/<slotId>`. For the composed
+ * preset it's every owned slot deactivated in the composed scope; for a source
+ * preset it's that source's own slots deactivated in its own scope.
+ */
+export function deactivatedListForPreset(
   data: InspectResult,
+  preset: string,
   stagedOwnership: StagedOwnership,
   stagedDeactivation: StagedDeactivation,
 ): string[] {
+  const isComposed = preset === data.preset;
   const entries: string[] = [];
   for (const slot of unifiedSlots(data)) {
     const owner = effectiveOwner(slot, stagedOwnership);
-    if (owner && effectiveDeactivated(slot, stagedDeactivation)) {
-      entries.push(`${owner}/${slot.slotId}`);
+    if (isComposed) {
+      if (!owner) continue;
+      if (effectiveDeactivatedFor(data, slot, preset, stagedDeactivation)) {
+        entries.push(`${owner}/${slot.slotId}`);
+      }
+    } else {
+      if (owner !== preset) continue; // only this source's own plugins
+      if (effectiveDeactivatedFor(data, slot, preset, stagedDeactivation)) {
+        entries.push(`${preset}/${slot.slotId}`);
+      }
     }
   }
   return entries;

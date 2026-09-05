@@ -24,10 +24,11 @@ import type { InspectResult } from "../bridge";
 import {
   accentForOwner,
   buildRows,
-  effectiveDeactivated,
+  deactivationKey,
+  effectiveDeactivatedFor,
   effectiveExcluded,
   importSources,
-  inspectDeactivated,
+  inspectDeactivatedFor,
   inspectOwner,
   type OwnershipRow,
 } from "../ownership";
@@ -135,6 +136,7 @@ export function PluginTable({
                 <PluginRow
                   key={row.slot.slotId}
                   row={row}
+                  data={data}
                   ownerSource={ownerSource}
                   composedView={composedView}
                   sources={sources}
@@ -151,12 +153,14 @@ export function PluginTable({
 
 function PluginRow({
   row,
+  data,
   ownerSource,
   composedView,
   sources,
   edits,
 }: {
   row: OwnershipRow;
+  data: InspectResult;
   ownerSource: string | null;
   composedView: boolean;
   sources: string[];
@@ -171,12 +175,20 @@ function PluginRow({
   const here = ownerSource != null && owner === ownerSource;
   const isOther = owner != null && owner !== ownerSource;
   const checked = owner != null;
-  const deactivated = effectiveDeactivated(slot, edits.deactivation);
+  // Deactivate is scoped to the tab's preset (composed preset, or this source).
+  const deactivated =
+    ownerSource != null &&
+    effectiveDeactivatedFor(data, slot, ownerSource, edits.deactivation);
   const excluded = effectiveExcluded(slot.slotId, excludedBaseline, edits.exclusion);
   const powerAccent = composedView ? undefined : accentForOwner(owner, sources);
+  // Shown for any owned slot in the composed view, but only this source's own
+  // plugins in a source tab (a source's `deactivated` covers only its own).
+  const showDeactivate =
+    ownerSource != null && (composedView ? owner != null : here);
   const modified =
     edits.ownership.has(slot.slotId) ||
-    edits.deactivation.has(slot.slotId) ||
+    (ownerSource != null &&
+      edits.deactivation.has(deactivationKey(ownerSource, slot.slotId))) ||
     edits.exclusion.has(slot.slotId);
 
   // Composed view sorts the whole chain; import tabs only sort their own.
@@ -246,7 +258,7 @@ function PluginRow({
       )}
       {slot.pluginType && <span className={bem("type")}>{slot.pluginType}</span>}
 
-      {owner != null && (
+      {showDeactivate && ownerSource != null && (
         <button
           type="button"
           className={bem("deactivate", { off: deactivated })}
@@ -260,9 +272,10 @@ function PluginRow({
           title={deactivated ? "Deactivated (bypassed)" : "Deactivate"}
           onClick={() =>
             edits.stageDeactivation(
+              ownerSource,
               slot.slotId,
               !deactivated,
-              inspectDeactivated(slot),
+              inspectDeactivatedFor(data, slot, ownerSource),
             )
           }
         >
