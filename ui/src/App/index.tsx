@@ -39,11 +39,12 @@ export function App() {
   const invoke = useInvoke();
   const [saving, setSaving] = useState(false);
 
-  // A fresh inspect (track change / commit / manual refresh) is a new baseline
-  // — drop any staged edits.
+  // Drop staged edits only when the SELECTED TRACK changes — not on every
+  // inspect (the chunk-hash poll re-inspects the same track constantly; clearing
+  // on that would wipe pending edits mid-work). Commit clears explicitly.
   useEffect(() => {
     clear();
-  }, [data, clear]);
+  }, [data?.trackGuid, clear]);
 
   async function saveChanges() {
     if (!data) return;

@@ -35,7 +35,10 @@ export function useInspect() {
     void refresh();
   }, [refresh]);
 
+  // selection-changed = a different track; track-changed = the same track's
+  // state changed (param tweak, FX edit). Both re-inspect.
   useEvent("selection-changed", () => void refresh());
+  useEvent("track-changed", () => void refresh());
 
   return { data, error, loading, refresh };
 }

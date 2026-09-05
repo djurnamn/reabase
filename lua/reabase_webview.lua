@@ -265,9 +265,25 @@ if not reaper.Webview_Open(WINDOW_ID, ENTRY, flags, nil, 480, 720) then
   return
 end
 
--- Notify the page when the selected track changes so it can re-inspect.
--- Compared by the track's pointer string; "none" when nothing is selected.
+-- Change detection. We emit two events the page re-inspects on:
+--   selection-changed — the selected track pointer changed.
+--   track-changed     — the SAME track's state changed (param tweak, FX add/
+--                        remove/reorder, bypass), detected by hashing the chunk
+--                        on a throttle.
 local last_track_id = nil
+local last_chunk_hash = nil
+local poll_counter = 0
+local POLL_INTERVAL = 20 -- ~0.7s at 30fps
+
+-- djb2 over the whole chunk (so a param change anywhere is caught) plus the
+-- length (so add/remove is caught). Throttled, so the full-chunk cost is fine.
+local function chunk_hash(str)
+  local hash = 5381
+  for i = 1, #str do
+    hash = ((hash * 33) + string.byte(str, i)) % 0x100000000
+  end
+  return hash .. ":" .. #str
+end
 
 local function loop()
   while true do
@@ -280,7 +296,22 @@ local function loop()
   local id = track and tostring(track) or "none"
   if id ~= last_track_id then
     last_track_id = id
+    last_chunk_hash = nil
+    poll_counter = 0
     reaper.Webview_Emit(WINDOW_ID, "selection-changed", "{}")
+  elseif track then
+    poll_counter = poll_counter + 1
+    if poll_counter >= POLL_INTERVAL then
+      poll_counter = 0
+      local chunk = get_track_chunk(track)
+      if chunk then
+        local hash = chunk_hash(chunk)
+        if last_chunk_hash ~= nil and hash ~= last_chunk_hash then
+          reaper.Webview_Emit(WINDOW_ID, "track-changed", "{}")
+        end
+        last_chunk_hash = hash
+      end
+    end
   end
 
   reaper.defer(loop)
